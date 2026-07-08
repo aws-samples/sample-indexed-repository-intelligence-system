@@ -1,0 +1,146 @@
+###############################################################################
+#  Python artifacts
+###############################################################################
+__pycache__/
+*.py[cod]          # compiled byte-code
+*.pyo
+*.pyd
+*.so               # C-extensions on Linux/macOS
+*.dll              # C-extensions on Windows
+
+# Distribution / build output
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+###############################################################################
+#  Virtual environments
+###############################################################################
+# (keep only the one you actually use)
+env/
+venv/
+.venv/
+.venv_dev/
+venv_dev/
+ENV/
+.conda/
+.mypy_cache/
+
+###############################################################################
+#  Testing & coverage
+###############################################################################
+.pytest_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+.nox/
+.lint_reports
+
+###############################################################################
+#  Static analysis / tooling
+###############################################################################
+.mypy_cache/
+.pyre/
+.cache/
+ruff_cache/
+.dmypy.json
+
+###############################################################################
+#  Packaging helpers
+###############################################################################
+*.manifest
+*.spec
+*.log
+
+###############################################################################
+#  Secrets / environment files
+###############################################################################
+.env
+.env.*             # .env.local, .env.dev, etc.
+!frontend/.env
+*.pem
+*.crt
+*.key
+
+###############################################################################
+#  Configuration files (user-specific)
+###############################################################################
+/config.yaml
+/infra/config.yaml
+
+###############################################################################
+#  System-specific files
+###############################################################################
+.DS_Store
+
+###############################################################################
+#  Git internal files (should not be committed)
+###############################################################################
+.git/config
+.git/description
+
+###############################################################################
+#  Editors & IDEs
+###############################################################################
+# VS Code
+.vscode/
+# PyCharm / IntelliJ
+.idea/
+# Sublime
+*.sublime-workspace
+*.sublime-project
+
+###############################################################################
+#  Default Cache Directory
+###############################################################################
+**/.iris_cache/
+.prompt_agent_cache/
+
+node_modules/
+# CDK
+cdk.out/
+!runtime-config-cloud.js
+!runtime-config-dev.js
+*.d.ts
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+.ash/
+*.bak
+codebase_artifacts/
+!frontend/src/config/*
+config_docker.yaml
+
+.backend.pid
+.kiro/
+.claude/
+# DevSecOps - Generated files (safe to ignore)
+ferret-sast-report.json
+ferret-scan-results.sarif
+.ash/
+.eslintcache
+
+# Generated analysis output directories
+output/
+codebase-output/
+IAC/
+
+# DevSecOps - Tool cache directories
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

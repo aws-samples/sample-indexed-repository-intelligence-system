@@ -1,0 +1,34 @@
+<codebase_overview_json_schema>
+```json
+{
+    "purpose": <str>,
+    "genai_system": <str>,
+    "has_bugs": <str>,
+    "imported_files": <List>,
+    "classes": {
+        "<class_name_1>": {
+            "purpose": <str>,
+            "methods": {
+                "<method_name_1>": <str>,
+                "<method_name_2>": <str>,
+                ...
+            },
+        },
+        "<class_name_2>": {
+            "purpose": <str>,
+            "methods": {
+                "<method_name_1>": <str>,
+                "<method_name_2>": <str>,
+                ...
+            },
+        },
+        ...
+    },
+    "functions": {
+        "<function_name_1>": <str>,
+        "<function_name_2>": <str>,
+        ...
+    }
+}
+```
+</codebase_overview_json_schema>

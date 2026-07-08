@@ -1,0 +1,10 @@
+.git/
+node_modules/
+build/
+cdk.out/
+*.log
+*.pyc
+__pycache__/
+.venv/
+.env
+.DS_Store

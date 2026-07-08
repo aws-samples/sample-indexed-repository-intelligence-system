@@ -1,0 +1,93 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Use ECR Public Python base image
+FROM public.ecr.aws/docker/library/python:3.13-slim-bookworm
+
+# Install uv
+RUN pip install uv
+
+WORKDIR /app
+
+# Copy entire project
+COPY . ./iris
+RUN rm -rf ./iris/.venv
+
+# Install system dependencies and upgrade all packages for security
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
+    curl \
+    git \
+    unzip \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install AWS CLI v2 from official source (architecture-aware)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        AWS_CLI_ARCH="x86_64"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        AWS_CLI_ARCH="aarch64"; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_CLI_ARCH}.zip" -o "awscliv2.zip" \
+    && unzip awscliv2.zip \
+    && ./aws/install \
+    && rm -rf awscliv2.zip aws
+
+# Install and upgrade specific vulnerable packages to advisory versions to avoid CVE errors
+RUN apt-get update && apt-get install -y \
+    libpam-modules \
+    libpam0g \
+    libglib2.0-0 \
+    libglib2.0-data \
+    gnupg2 \
+    libxml2 \
+    openssl \
+    libssl3 \
+    libexpat1 \
+    libgnutls30 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify installed versions for security compliance
+RUN echo "=== SECURITY PACKAGE VERSIONS ===" && \
+    dpkg -l | grep -E "(libpam|libglib2.0|gnupg|libxml2|gnutls)" | awk '{print $2, $3}'
+
+# Environment variables for S3
+ENV S3_BUCKET=""
+ENV S3_PREFIX=""
+
+# Change to iris directory for dependency installation
+WORKDIR /app/iris
+
+# Delete config.yaml and rename config_docker.yaml to config.yaml
+RUN rm -f config.yaml && mv config_docker.yaml config.yaml
+
+# Install dependencies using uv
+RUN uv sync --frozen --no-cache
+
+# Upgrade zipp and urllib3 to fix vulnerabilities
+RUN uv pip install --system --upgrade zipp "urllib3>=2.2.3"
+
+# Copy and prepare startup script (while still root)
+WORKDIR /app/iris/backend
+COPY backend/startup-s3.sh ./startup-s3.sh
+RUN chmod +x ./startup-s3.sh
+
+# Create non-root user with home directory
+RUN groupadd -r appuser && useradd -r -g appuser -m appuser
+RUN mkdir -p /app/codebase_data/output && chown -R appuser:appuser /app
+USER appuser
+
+# Set environment variables
+ENV PYTHONPATH=/app/iris
+ENV PYTHONUNBUFFERED=1
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["./startup-s3.sh"]

@@ -1,0 +1,3 @@
+<agentcore_documentation_mcp>
+**AgentCore Documentation Tools**: Access detailed guides for deploying and managing agents on Amazon Bedrock AgentCore, including runtime deployment, memory management, and gateway configuration. Use these when users ask about agent deployment or AgentCore features.
+</agentcore_documentation_mcp>

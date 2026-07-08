@@ -1,0 +1,88 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+version: "3.8"
+
+services:
+  # WebSocket Backend Service (S3 Mode)
+  websocket-backend:
+    image: iris-websocket-backend-s3:latest
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile_s3
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_PREFIX=${S3_PREFIX}
+      # AWS Credentials - passed from host environment via start-docker-s3.sh
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - AWS_REGION
+      # Allow unauthenticated access for local Docker development (no Cognito)
+      - ALLOW_ANONYMOUS=true
+    volumes:
+      # Mount AWS credentials directory for profile-based authentication
+      - ~/.aws:/root/.aws:ro
+    tmpfs:
+      - /tmp
+      - /home/appuser/.cache
+      - /home/appuser/.local
+      - /app/codebase_data:mode=1777
+      - /app/iris/backend/repl_state:mode=1777
+    read_only: true
+    command: ["./startup-s3.sh"]
+    networks:
+      - iris-network
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React Frontend Service
+  react-frontend:
+    image: iris-react-frontend-s3:latest
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        - BUILD_MODE=${BUILD_MODE:-dev} # Use dev by default, override with BUILD_MODE env var
+        - VITE_BACKEND_URL=http://localhost:8000 # Browser connects to localhost
+        - VITE_WEBSOCKET_URL=ws://localhost:8000/ws # Browser connects to localhost
+        - VITE_AUTH_ENABLED=false # Bypass Cognito for local development
+        - VITE_APP_NAME="IRIS (Docker S3)"
+    ports:
+      - "3000:3000"
+    environment:
+      - DEPLOYMENT_MODE=dev # Set to dev mode for local development
+    tmpfs:
+      - /tmp
+      - /home/appuser/.npm
+      - /home/appuser/.cache
+    read_only: true
+    networks:
+      - iris-network
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      websocket-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  iris-network:
+    driver: bridge

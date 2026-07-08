@@ -1,0 +1,180 @@
+.chat-container {
+  height: calc(100vh - 260px);
+  min-height: 400px;
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid #e9ebed;
+  border-radius: 8px;
+  padding: 16px;
+  background-color: #fafbfc;
+}
+
+/* Streaming indicator for AWS chat bubbles */
+.streaming-indicator {
+  animation: blink 1s infinite;
+  font-size: 14px;
+}
+
+.chat-input {
+  flex: 1;
+  width: 100%;
+}
+
+@keyframes blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+
+  51%,
+  100% {
+    opacity: 0.3;
+  }
+}
+
+.message-content {
+  line-height: 1.6;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.message-content h1 {
+  font-size: 1.5em;
+  border-bottom: 1px solid #e9ebed;
+  padding-bottom: 8px;
+}
+
+.message-content h2 {
+  font-size: 1.3em;
+  border-bottom: 1px solid #e9ebed;
+  padding-bottom: 6px;
+}
+
+.message-content h3 {
+  font-size: 1.2em;
+}
+
+.message-content h4 {
+  font-size: 1.1em;
+}
+
+.message-content h5,
+.message-content h6 {
+  font-size: 1em;
+}
+
+/* Paragraphs */
+.message-content p {
+  margin: 8px 0;
+}
+
+/* Code blocks and inline code */
+.message-content code {
+  background-color: rgba(175, 184, 193, 0.2);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.9em;
+}
+
+.message-content pre {
+  background-color: #f6f8fa;
+  border: 1px solid #e9ebed;
+  border-radius: 6px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.message-content pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.85em;
+}
+
+/* Lists */
+.message-content ul,
+.message-content ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.message-content li {
+  margin: 4px 0;
+}
+
+.message-content ul ul,
+.message-content ol ol,
+.message-content ul ol,
+.message-content ol ul {
+  margin: 0;
+}
+
+/* Links */
+.message-content a {
+  color: #0972d3;
+  text-decoration: none;
+}
+
+.message-content a:hover {
+  text-decoration: underline;
+}
+
+/* Blockquotes */
+.message-content blockquote {
+  border-left: 4px solid #e9ebed;
+  padding-left: 16px;
+  margin: 12px 0;
+  color: #687078;
+  font-style: italic;
+}
+
+/* Tables */
+.message-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+}
+
+.message-content th,
+.message-content td {
+  border: 1px solid #e9ebed;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.message-content th {
+  background-color: #f6f8fa;
+  font-weight: 600;
+}
+
+/* Horizontal rules */
+.message-content hr {
+  border: none;
+  border-top: 1px solid #e9ebed;
+  margin: 16px 0;
+}
+
+/* Strong and emphasis */
+.message-content strong {
+  font-weight: 600;
+}
+
+.message-content em {
+  font-style: italic;
+}
+
+/* Task lists */
+.message-content input[type="checkbox"] {
+  margin-right: 8px;
+}

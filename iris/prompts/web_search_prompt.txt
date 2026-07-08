@@ -1,0 +1,7 @@
+<web_search_capability>
+You have access to web search via `web_search` tool. Use it when user asks for information outside of the codebase but easily accessible on the web (e.g., Bedrock model ids).
+
+Web search only returns small snippets from web pages. Do not use it to find comprehensive instructions, detailed documentation or other long texts.
+
+Search results may be sensitive to exact wording of the search query. If your initial results didn't have the required information, try again with slightly different query.
+</web_search_capability>

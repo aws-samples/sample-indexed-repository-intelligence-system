@@ -1,0 +1,19 @@
+<codebase_overview_description>
+The codebase overview describes the purpose of the files and code, their relationships, and other important information to help understand the codebase without examining each file directly.
+
+It is presented as a JSON object with the following fields.
+- "purpose": A high-level description of the file's purpose
+- "genai_system": A string indicating whether the file defines a generative AI system/solution or major components of a generative AI system/solution (choose from "Yes" and "No")
+- "has_bugs": A string indicating whether the file has bugs or major issues (choose from "Yes, clear bugs", "Potential bugs", and "No bugs")
+- "imported_files": A list of paths of files in the codebase that this file imports or uses (excluding third-party packages)
+- "classes": a dictionary of classes defined in this file, where:
+    - Keys are class names
+    - Values are dictionaries with the following keys:
+        - "purpose": The purpose and description of the class
+        - "methods": A dictionary of methods defined in this class, where:
+            - Keys are method names
+            - Values are very brief method descriptions that cover: (1) the high-level purpose of the method; (2) input parameter summary; (3) output or return value summary
+- "functions": A dictionary of standalone functions (excluding those defined in a class) defined in this file, where:
+    - Keys are function names
+    - Values are very brief function descriptions that cover: (1) the high-level purpose of the function; (2) input parameter summary; (3) output or return value summary
+</codebase_overview_description>

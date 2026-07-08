@@ -1,0 +1,37 @@
+Indexed Repository Intelligence System (IRIS)
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+This software is licensed under the MIT-0 License. See the LICENSE file.
+
+------------------------------------------------------------------------------
+Notices
+------------------------------------------------------------------------------
+
+This project is provided as an example and starting point for development. It
+is offered for informational and demonstration purposes only and without
+warranties of any kind. You are solely responsible for testing, validation,
+security and performance assessment, and compliance with your organization's
+requirements before any production use. It reflects current AWS offerings,
+which may change without notice, and creates no commitment from AWS, its
+affiliates, suppliers, or licensors.
+
+------------------------------------------------------------------------------
+Third-Party Components
+------------------------------------------------------------------------------
+
+This project does not bundle or vendor third-party source code or assets; the
+only included images are this project's own architecture diagrams. It relies on
+third-party open-source dependencies that are referenced (not redistributed
+here), each retaining its own license:
+
+  - Python dependencies are declared in pyproject.toml and pinned in uv.lock.
+  - JavaScript/frontend dependencies are declared in frontend/package.json and
+    pinned in frontend/package-lock.json.
+
+Consult those manifests and each package's own distribution for its license
+text.
+
+When the optional web search feature is enabled, this project queries
+DuckDuckGo, a third-party service. See the "Third-Party Services" section of
+README.md for details and a link to DuckDuckGo's terms of service.

@@ -1,0 +1,3 @@
+<aws_documentation_mcp>
+**AWS Documentation Tools**: Search and retrieve comprehensive AWS service documentation, API references, and best practices. Use these when users ask about AWS services, deployment, or cloud architecture.
+</aws_documentation_mcp>

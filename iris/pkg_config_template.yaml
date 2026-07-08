@@ -1,0 +1,186 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Package Configuration for IRIS
+# It is a customized copy of config_template.yaml in root level for Python Package Distribution
+
+# The codebase to evaluate
+codebase_dir: /path/to/your/codebase
+
+# The folder where code evaluation output is located
+output_dir: .iris_cache
+
+# MCP Server: List of tools to enable (default: all)
+# Options: "all", "codebase_context", "codebase_query"
+mcp_enabled_tools:
+  - all
+
+# Amazon Bedrock model configurations
+# Make sure you have access to all the following models in the corresponding regions
+model_configuration:
+  file_summarizer:
+    # You can leverage multiple model-region pairs to speed up file summarization
+    # The workload will be distributed across listed model-region pairs
+    # The more model-region pairs you provide, the faster the file summarization will be
+    models:
+      - model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: us-west-2
+      - model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: us-east-2
+      - model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: us-east-1
+      - model_id: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: eu-west-1
+      - model_id: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: eu-west-3
+      - model_id: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: eu-central-1
+      - model_id: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: eu-north-1
+      - model_id: global.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: ap-northeast-1
+      - model_id: global.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: ap-southeast-1
+      - model_id: global.anthropic.claude-haiku-4-5-20251001-v1:0
+        region: ap-south-1
+  orchestrator:
+    model_id: us.anthropic.claude-sonnet-5
+    region: us-east-1
+  file_identifier:
+    model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    region: us-east-2
+
+# Whether to assume a cross-account IAM role (via ROLE_ARN) for Bedrock access
+# instead of using the default credentials. Leave false to use standard AWS
+# credentials (environment variables, profile, or instance role).
+use_super_profile: false
+
+# The file with additional context relevant for codebase
+context_file: /path/to/additional/context/file.txt
+
+# Whether to enable web search functionality
+web_search: true
+
+# MCP Server Integration - Connect to external MCP servers for additional capabilities
+mcp_servers:
+  aws_documentation:
+    enabled: false
+    command: "uvx"
+    args: ["awslabs.aws-documentation-mcp-server@latest"]
+    env:
+      FASTMCP_LOG_LEVEL: "ERROR"
+    # Optional: Filter which tools to expose from this MCP server
+    tool_filters:
+      allowed: ["search_documentation", "read_documentation", "recommend"] # Only these tools
+      rejected: ["get_available_services"] # Exclude these tools
+    # Optional: Add prefix to tool names to avoid conflicts
+    prefix: "aws_docs" # Tools become: aws_docs_search_documentation, etc.
+
+  agentcore_docs:
+    enabled: false
+    command: "uvx"
+    args: ["awslabs.amazon-bedrock-agentcore-mcp-server@latest"]
+    env:
+      FASTMCP_LOG_LEVEL: "ERROR"
+    # Optional: Filter which tools to expose from this MCP server
+    tool_filters:
+      allowed: ["search_agentcore_docs", "fetch_agentcore_doc"]
+      rejected: ["manage_agentcore_runtime"]
+      # Optional: Add prefix to tool names
+      # prefix: "agentcore"
+
+  strands_agents_docs:
+    enabled: false
+    command: "uvx"
+    args: ["strands-agents-mcp-server@latest"]
+    env:
+      FASTMCP_LOG_LEVEL: "ERROR"
+    # Optional: Filter which tools to expose from this MCP server
+    tool_filters:
+      allowed: ["search_docs", "fetch_doc"]
+    # Optional: Add prefix to tool names
+    prefix: "strands"
+
+# Whether to bypass the consent step for tool invocations
+bypass_tool_consent: true
+
+# Enable prompt caching for cost optimization and reduced latency.
+# Uses SystemContentBlock with CachePoint to cache system prompts.
+# Benefits: up to ~90% cost reduction on cached tokens and up to ~85% lower latency.
+#
+# All models configured above (Sonnet 5, Haiku 4.5) support prompt caching. For the
+# authoritative list of supported models, per-model token minimums, and TTL support,
+# see: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+enable_prompt_caching: true
+
+# Cache TTL (Time To Live): "5m" or "1h"
+# Not all models support the 1h TTL — check the model card / prompt-caching doc above
+# before switching. Keep "5m" unless every configured model supports "1h".
+cache_ttl: "5m"
+
+# Context window size (in tokens)
+context_window_size: 200_000
+
+# Maximum size of regular files to process (in bytes). Files (including notebooks after image removal) larger than this value will be ignored
+max_file_size: 2_000_000
+
+# Maximum size of notebooks to process (in bytes). Notebooks larger than this value will be ignored
+max_notebook_size: 2_000_000_000
+
+# List of patterns to ignore when generating directory tree
+ignore_patterns:
+  - "build/"
+  - "_build/"
+  - "_templates/"
+  - "dist/"
+  - "downloads/"
+  - "codebase-output/"
+  - "output/"
+  - "outputs/"
+  - "node_modules/"
+  - "test/"
+  - "archive/"
+  - "eggs/"
+  - "develop-eggs/"
+  - "*.egg-info/"
+  - "*.egg"
+  - "*.py[cod]"
+  - "*$py.class"
+  - "*.so"
+  - ".Python"
+  - ".installed.cfg"
+  - ".env/"
+  - .venv/
+  - .venv_dev/
+  - env/
+  - venv/
+  - venv_dev/
+  - ENV/
+  - ".coverage"
+  - ".DS_Store"
+  - ".git/"
+  - ".gitlab/"
+  - ".github/"
+  - ".idea/"
+  - "__pycache__/"
+  - ".ruff_cache/"
+  - ".pytest_cache/"
+  - ".iris_cache/"
+  - "repl_state/"
+  - "*.png"
+  - "*.jpg"
+  - "*.jpeg"
+  - "*.bmp"
+  - "*.ico"
+  - "*.zip"
+  - "*.gz"
+  - "*.tar"
+  - "*.jar"
+  - "*.class"
+  - "*.exe"
+  - "*.lock"
+  - "cdk.out/"
+  - "codebase_artifacts/*"
+  - ".ash/*"
+  - "package-lock.json"
+  - "*.log"
+  - "iris.egg-info/"

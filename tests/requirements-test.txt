@@ -1,0 +1,33 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# Test dependencies for iris
+# Install with: pip install -r tests/requirements-test.txt
+
+
+# Code quality
+black>=25.12.0
+boto3>=1.40.11
+chardet
+click
+
+# Coverage reporting
+coverage[toml]>=7.4.0
+fastapi>=0.121.0  # For backend tests
+flake8>=7.0.0
+
+# Backend testing
+httpx>=0.27.0  # FastAPI test client
+isort>=7.0.0
+pathspec
+pydantic>=2.0.0
+# Core testing framework
+pytest>=8.4.1
+pytest-asyncio>=0.23.0  # Async test support
+pytest-cov>=4.1.0
+pytest-timeout>=2.2.0  # Test timeouts
+pytest-xdist>=3.5.0  # Parallel test execution
+
+# Required for running tests (from main dependencies)
+PyYAML>=6.0
+rich
+tqdm>=4.67.1

@@ -1,0 +1,84 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+version: "3.8"
+
+services:
+  # WebSocket Backend Service
+  websocket-backend:
+    image: iris-websocket-backend:latest
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      # AWS Credentials - passed from host environment via start-docker.sh
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - AWS_REGION
+      # Allow unauthenticated access for local Docker development (no Cognito)
+      - ALLOW_ANONYMOUS=true
+    volumes:
+      # Mount AWS credentials directory for profile-based authentication
+      - ~/.aws:/root/.aws:ro
+      # Writable anonymous volume for codebase output (preserves appuser ownership from image)
+      - /app/codebase_data/output
+    tmpfs:
+      - /tmp
+      - /app/iris/backend/repl_state
+      - /home/appuser/.cache
+      - /home/appuser/.local
+    read_only: true
+    command: ["/app/iris/.venv/bin/python", "websocket_server.py"]
+    networks:
+      - iris-network
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React Frontend Service
+  react-frontend:
+    image: iris-react-frontend:latest
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        - BUILD_MODE=${BUILD_MODE:-dev} # Use dev by default, override with BUILD_MODE env var
+        - VITE_BACKEND_URL=http://localhost:8000 # Browser connects to localhost
+        - VITE_WEBSOCKET_URL=ws://localhost:8000/ws # Browser connects to localhost
+        - VITE_AUTH_ENABLED=false # Bypass Cognito for local development
+        - VITE_APP_NAME="IRIS (Docker)"
+    ports:
+      - "3000:3000"
+    environment:
+      - DEPLOYMENT_MODE=dev # Set to dev mode for local development
+    tmpfs:
+      - /tmp
+      - /home/appuser/.npm
+      - /home/appuser/.cache
+    read_only: true
+    networks:
+      - iris-network
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      websocket-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  iris-network:
+    driver: bridge

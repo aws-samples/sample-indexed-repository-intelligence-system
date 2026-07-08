@@ -1,0 +1,249 @@
+@import "tailwindcss";
+
+/* ============================================
+   Global Styles - Chat UI Modernization
+   Requirements: 8.3 - Modern design principles
+   ============================================ */
+
+/* Base styles */
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  background-color: #fafafa;
+  color: #18181b;
+  line-height: 1.5;
+}
+
+/* Focus styles for accessibility */
+*:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Scrollbar styling for modern look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f4f4f5;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+
+/* Custom animations for TreeView */
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slideDown {
+  animation: slideDown 0.2s ease-out;
+}
+
+/* Streaming indicator animation */
+@keyframes blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+
+  51%,
+  100% {
+    opacity: 0.3;
+  }
+}
+
+.animate-blink {
+  animation: blink 1s infinite;
+}
+
+/* Message content styling for markdown */
+.message-content {
+  line-height: 1.6;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.message-content h1 {
+  font-size: 1.5em;
+  border-bottom: 1px solid #e4e4e7;
+  padding-bottom: 8px;
+}
+
+.message-content h2 {
+  font-size: 1.3em;
+  border-bottom: 1px solid #e4e4e7;
+  padding-bottom: 6px;
+}
+
+.message-content h3 {
+  font-size: 1.2em;
+}
+
+.message-content h4 {
+  font-size: 1.1em;
+}
+
+.message-content h5,
+.message-content h6 {
+  font-size: 1em;
+}
+
+.message-content p {
+  margin: 8px 0;
+}
+
+.message-content .inline-code {
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.9em;
+}
+
+.message-content ul,
+.message-content ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.message-content ul {
+  list-style: disc;
+}
+
+.message-content ol {
+  list-style: decimal;
+}
+
+.message-content li {
+  margin: 4px 0;
+}
+
+.message-content ul ul,
+.message-content ol ol,
+.message-content ul ol,
+.message-content ol ul {
+  margin: 0;
+}
+
+.message-content a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.message-content a:hover {
+  text-decoration: underline;
+}
+
+.message-content blockquote {
+  border-left: 4px solid #e4e4e7;
+  padding-left: 16px;
+  margin: 12px 0;
+  color: #71717a;
+  font-style: italic;
+}
+
+.message-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+}
+
+.message-content th,
+.message-content td {
+  border: 1px solid #e4e4e7;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.message-content th {
+  background-color: #f4f4f5;
+  font-weight: 600;
+}
+
+.message-content hr {
+  border: none;
+  border-top: 1px solid #e4e4e7;
+  margin: 16px 0;
+}
+
+.message-content strong {
+  font-weight: 600;
+}
+
+.message-content em {
+  font-style: italic;
+}
+
+.message-content input[type="checkbox"] {
+  margin-right: 8px;
+}
+
+/* Tree view specific styles */
+.tree-view {
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.tree-children {
+  animation: slideDown 0.2s ease-out;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .tree-content {
+    max-height: 300px;
+  }
+
+  /* Hide file sizes on mobile for cleaner display */
+  .tree-file-size {
+    display: none;
+  }
+}
+
+/* Utility classes for chat components */
+.chat-container {
+  height: calc(100vh - 120px);
+  min-height: 400px;
+}
+
+/* Smooth transitions for interactive elements */
+.transition-smooth {
+  transition: all 0.2s ease-in-out;
+}

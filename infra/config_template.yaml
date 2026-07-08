@@ -1,0 +1,41 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+# CDK stack name for the deployment
+app_name: "IrisStandalone"
+
+# ECS Fargate resource allocation settings
+resources:
+  total_memory_mib: 4096 # Total memory allocated to ECS task (in MiB)
+  total_cpu: 2048 # Total CPU allocated to ECS task (in CPU units, 1024 = 1 vCPU)
+
+  # Frontend container resource allocation (as percentage of total)
+  frontend:
+    memory_percentage: 40 # Percentage of total memory for React frontend
+    cpu_percentage: 40 # Percentage of total CPU for React frontend
+
+  # Backend container resource allocation (as percentage of total)
+  backend:
+    memory_percentage: 60 # Percentage of total memory for Python backend
+    cpu_percentage: 60 # Percentage of total CPU for Python backend
+
+# ECS service configuration
+service:
+  desired_count: 1 # Number of ECS tasks to run (for high availability, use 2+)
+  max_azs: 2 # Maximum number of Availability Zones for VPC deployment
+
+# S3 bucket configuration for codebase artifacts
+# Note: The CDK stack enforces the following on all infrastructure S3 buckets:
+#   - Block Public Access: BLOCK_ALL (prevents accidental public exposure)
+#   - Encryption at rest: SSE-S3 enabled by default
+#   - Versioning: Enabled
+#   - TLS/HTTPS: Enforced (enforce_ssl=True)
+#   - Access logging: Enabled to ServerAccessLogsBucket
+# The kms_key_arn below is only for specifying a customer managed AWS KMS key for additional control.
+codebase_artifacts:
+  bucket: "<placeholder>" # S3 bucket name containing codebase data (leave empty to disable S3 mode)
+  prefix: "" # Optional S3 prefix/key (leave empty if not needed)
+  kms_key_arn: "" # Optional: Customer managed AWS KMS key ARN. SSE-S3 encryption is always enabled; set this to use SSE-KMS instead.
+
+# CloudWatch logging configuration
+logging:
+  retention_days: 7 # Number of days to retain CloudWatch logs

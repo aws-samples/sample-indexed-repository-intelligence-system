@@ -1,0 +1,3 @@
+<strands_agents_docs_mcp>
+**Strands Agents Documentation Tools**: Search and retrieve Strands Agents SDK documentation, including guides, API references, and examples. Use these when users ask about Strands framework features, agent patterns, or SDK usage.
+</strands_agents_docs_mcp>
