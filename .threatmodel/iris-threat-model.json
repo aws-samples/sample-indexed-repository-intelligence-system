@@ -2,7 +2,7 @@
   "schema": 1,
   "applicationInfo": {
     "name": "Threat Model Export",
-    "description": "IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a real-time WebSocket-based chat interface for querying code. The system uses a React frontend served via CloudFront, a FastAPI WebSocket backend on ECS Fargate, Cognito for authentication, S3 for codebase storage, and DynamoDB for optional conversation logging. It also exposes an MCP server for IDE integration."
+    "description": "IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to Amazon S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a chat interface for querying code. The system uses a React frontend served via Amazon CloudFront from a private Amazon S3 bucket, an Amazon Bedrock AgentCore Runtime backend, Amazon Cognito for authentication, and Amazon S3 for codebase storage. It also exposes an MCP server for IDE integration."
   },
   "architecture": {
     "description": ""
@@ -21,7 +21,7 @@
     {
       "id": "A002",
       "numericId": 2,
-      "content": "VPC endpoints are configured for all AWS service access (S3, Bedrock, CloudWatch, ECR)",
+      "content": "Amazon Bedrock AgentCore Runtime isolates each session in a dedicated microVM and manages network access to AWS services (Amazon S3, Amazon Bedrock, Amazon CloudWatch) on behalf of the agent.",
       "displayOrder": 2,
       "metadata": []
     },
@@ -69,7 +69,7 @@
       "id": "13c03c68-a935-49a8-b61a-3f3a547b8580",
       "numericId": 4,
       "status": "mitigationIdentified",
-      "content": "Implement WebSocket connection rate limiting and per-user session limits. Add Bedrock API call budgets and throttling to prevent cost escalation from abuse.",
+      "content": "Implement per-session invocation rate limiting and per-user session limits. Add Amazon Bedrock API call budgets and throttling to prevent cost escalation from abuse.",
       "displayOrder": 4,
       "metadata": []
     },
@@ -82,43 +82,35 @@
       "metadata": []
     },
     {
-      "id": "f1abbd58-0727-4646-9207-db116d510637",
+      "id": "a1a0a642-ae19-4a6c-af93-facd9507abae",
       "numericId": 6,
       "status": "mitigationIdentified",
-      "content": "Enable Customer Managed Keys (CMK) for DynamoDB encryption when conversation logging is enabled. Implement data retention policies and automatic purging of old conversation data.",
+      "content": "Implement S3 bucket policy best practices: block public access, enforce encryption, restrict access to specific IAM roles, enable versioning and access logging.",
       "displayOrder": 6,
       "metadata": []
     },
     {
-      "id": "a1a0a642-ae19-4a6c-af93-facd9507abae",
+      "id": "10073200-2805-4521-979d-9d15b35d2104",
       "numericId": 7,
       "status": "mitigationIdentified",
-      "content": "Implement S3 bucket policy best practices: block public access, enforce encryption, restrict access to specific IAM roles, enable versioning and access logging. Use VPC endpoint policies to restrict S3 access.",
+      "content": "Implement dependency scanning in CI/CD pipeline. Pin dependency versions. Use private package registry. Regularly audit and update dependencies for known vulnerabilities.",
       "displayOrder": 7,
       "metadata": []
     },
     {
-      "id": "10073200-2805-4521-979d-9d15b35d2104",
+      "id": "25874549-794d-4d8f-bc0a-c138ed8864e0",
       "numericId": 8,
       "status": "mitigationIdentified",
-      "content": "Implement dependency scanning in CI/CD pipeline. Pin dependency versions. Use private package registry. Regularly audit and update dependencies for known vulnerabilities.",
+      "content": "Implement short-lived JWT access tokens with automatic refresh. Add token binding to prevent replay attacks.",
       "displayOrder": 8,
       "metadata": []
     },
     {
-      "id": "25874549-794d-4d8f-bc0a-c138ed8864e0",
+      "id": "04afc27c-a339-4c8f-8759-54bf5b68aed3",
       "numericId": 9,
       "status": "mitigationIdentified",
-      "content": "Implement short-lived JWT tokens with automatic refresh. Add token binding to prevent replay attacks. Consider implementing WebSocket-level session tokens that are distinct from authentication tokens.",
+      "content": "Apply least-privilege IAM policies to the Amazon Bedrock AgentCore Runtime execution role. Separate read and write permissions. Use condition keys to restrict access to specific resources.",
       "displayOrder": 9,
-      "metadata": []
-    },
-    {
-      "id": "04afc27c-a339-4c8f-8759-54bf5b68aed3",
-      "numericId": 10,
-      "status": "mitigationIdentified",
-      "content": "Apply least-privilege IAM policies for ECS task roles. Separate read and write permissions. Use condition keys to restrict access to specific resources. Enable IMDSv2 to protect container metadata.",
-      "displayOrder": 10,
       "metadata": []
     }
   ],
@@ -157,10 +149,6 @@
       "mitigationId": "10073200-2805-4521-979d-9d15b35d2104"
     },
     {
-      "linkedId": "3b1a46af-1f38-4264-89cf-09c4149d043a",
-      "mitigationId": "f1abbd58-0727-4646-9207-db116d510637"
-    },
-    {
       "linkedId": "7132d7f4-d0cd-4962-b983-62d4920271ee",
       "mitigationId": "04afc27c-a339-4c8f-8759-54bf5b68aed3"
     }
@@ -172,28 +160,41 @@
       "threatSource": "An unauthenticated attacker",
       "prerequisites": "when Cognito environment variables (USER_POOL_ID, USER_POOL_CLIENT_ID) are not configured",
       "threatAction": "access the system without authentication since the backend falls back to anonymous mode, granting default claims (sub: anonymous)",
-      "threatImpact": "complete unauthenticated access to all system features in local/Docker environments only — CDK cloud deployments always provision Cognito",
+      "threatImpact": "complete unauthenticated access to all system features in local/Docker environments only \u2014 CDK cloud deployments always provision Cognito",
       "impactedGoal": [],
-      "impactedAssets": ["A009"],
-      "statement": "An unauthenticated attacker, when running locally or via Docker without Cognito environment variables configured, can access the system without authentication since the backend falls back to anonymous mode. In cloud (CDK) deployments, Cognito is always provisioned and injected into the ECS task, so this threat does not apply to production.",
+      "impactedAssets": [
+        "A009"
+      ],
+      "statement": "An unauthenticated attacker, when running locally or via Docker without Cognito environment variables configured, can access the system without authentication since the backend falls back to anonymous mode. In cloud (CDK) deployments, Amazon Cognito is always provisioned and the AgentCore Runtime enforces its Cognito JWT authorizer on every invocation, so this threat does not apply to production.",
       "displayOrder": 1,
       "status": "threatIdentified",
-      "tags": ["authentication", "misconfiguration", "bypass"],
+      "tags": [
+        "authentication",
+        "misconfiguration",
+        "bypass"
+      ],
       "metadata": []
     },
     {
       "id": "2e5bafc1-c4d1-4102-8206-e326ee32bb38",
       "numericId": 2,
       "threatSource": "An authenticated user",
-      "prerequisites": "with authenticated access to the WebSocket chat interface",
+      "prerequisites": "with authenticated access to the chat interface",
       "threatAction": "craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework",
       "threatImpact": "unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls",
       "impactedGoal": [],
-      "impactedAssets": ["A008", "A011"],
-      "statement": "A An authenticated user with authenticated access to the WebSocket chat interface can craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework, which leads to unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls",
+      "impactedAssets": [
+        "A008",
+        "A011"
+      ],
+      "statement": "An authenticated user with authenticated access to the chat interface can craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework, which leads to unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls",
       "displayOrder": 2,
       "status": "threatIdentified",
-      "tags": ["prompt-injection", "LLM", "agentic"],
+      "tags": [
+        "prompt-injection",
+        "LLM",
+        "agentic"
+      ],
       "metadata": []
     },
     {
@@ -204,31 +205,22 @@
       "threatAction": "access the S3 codebase artifacts bucket directly, bypassing application-level controls, due to overly permissive bucket policies or IAM permissions",
       "threatImpact": "direct access to all customer source code stored in the S3 bucket, bypassing all application security controls",
       "impactedGoal": [],
-      "impactedAssets": ["A008"],
+      "impactedAssets": [
+        "A008"
+      ],
       "statement": "A An insider or external attacker with access to the AWS account or misconfigured S3 bucket policies can access the S3 codebase artifacts bucket directly, bypassing application-level controls, due to overly permissive bucket policies or IAM permissions, which leads to direct access to all customer source code stored in the S3 bucket, bypassing all application security controls",
       "displayOrder": 3,
       "status": "threatIdentified",
-      "tags": ["S3", "data-exposure", "misconfiguration"],
-      "metadata": []
-    },
-    {
-      "id": "e4dc04d7-59ad-47a2-9467-78d1eaa812b8",
-      "numericId": 4,
-      "threatSource": "An attacker with access to AWS internal network",
-      "prerequisites": "with ability to intercept traffic between CloudFront and ALB",
-      "threatAction": "intercept unencrypted HTTP traffic between CloudFront and ALB (which uses HTTP over AWS internal network) to capture JWT tokens, user queries, or code analysis results",
-      "threatImpact": "exposure of authentication tokens, user queries containing sensitive code context, and AI-generated responses",
-      "impactedGoal": [],
-      "impactedAssets": [],
-      "statement": "A An attacker with access to AWS internal network with ability to intercept traffic between CloudFront and ALB can intercept unencrypted HTTP traffic between CloudFront and ALB (which uses HTTP over AWS internal network) to capture JWT tokens, user queries, or code analysis results, which leads to exposure of authentication tokens, user queries containing sensitive code context, and AI-generated responses",
-      "displayOrder": 4,
-      "status": "threatIdentified",
-      "tags": ["TLS", "encryption-in-transit", "internal-network"],
+      "tags": [
+        "S3",
+        "data-exposure",
+        "misconfiguration"
+      ],
       "metadata": []
     },
     {
       "id": "170df664-6b13-4ff4-8709-084df7ed669c",
-      "numericId": 5,
+      "numericId": 4,
       "threatSource": "An attacker",
       "prerequisites": "with ability to exploit unsafe-inline and unsafe-eval CSP directives in the frontend",
       "threatAction": "inject malicious JavaScript via the chat interface that executes in other users' browsers, leveraging the CSP's unsafe-inline and unsafe-eval directives",
@@ -236,44 +228,60 @@
       "impactedGoal": [],
       "impactedAssets": [],
       "statement": "A An attacker with ability to exploit unsafe-inline and unsafe-eval CSP directives in the frontend can inject malicious JavaScript via the chat interface that executes in other users' browsers, leveraging the CSP's unsafe-inline and unsafe-eval directives, which leads to theft of JWT tokens, session hijacking, or manipulation of the chat interface to display misleading AI responses",
-      "displayOrder": 5,
+      "displayOrder": 4,
       "status": "threatIdentified",
-      "tags": ["XSS", "CSP", "frontend"],
+      "tags": [
+        "XSS",
+        "CSP",
+        "frontend"
+      ],
       "metadata": []
     },
     {
       "id": "ff786eef-bce3-4f8a-ad6b-9f47353bd44d",
-      "numericId": 6,
+      "numericId": 5,
       "threatSource": "An external attacker",
       "prerequisites": "with access to a stolen or leaked JWT token",
-      "threatAction": "replay the JWT token to establish a WebSocket connection and impersonate the legitimate user's session",
+      "threatAction": "replay the token to invoke the AgentCore Runtime and impersonate the legitimate user's session",
       "threatImpact": "full access to the impersonated user's session, including their codebase analysis results and conversation history",
       "impactedGoal": [],
-      "impactedAssets": ["A009"],
-      "statement": "A An external attacker with access to a stolen or leaked JWT token can replay the JWT token to establish a WebSocket connection and impersonate the legitimate user's session, which leads to full access to the impersonated user's session, including their codebase analysis results and conversation history",
-      "displayOrder": 6,
+      "impactedAssets": [
+        "A009"
+      ],
+      "statement": "An external attacker with access to a stolen or leaked JWT token can replay the token to invoke the AgentCore Runtime and impersonate the legitimate user's session, which leads to full access to the impersonated user's session, including their codebase analysis results and conversation history",
+      "displayOrder": 5,
       "status": "threatIdentified",
-      "tags": ["session-hijacking", "JWT", "WebSocket"],
+      "tags": [
+        "session-hijacking",
+        "JWT",
+        "token-replay"
+      ],
       "metadata": []
     },
     {
       "id": "7132d7f4-d0cd-4962-b983-62d4920271ee",
-      "numericId": 7,
+      "numericId": 6,
       "threatSource": "An attacker",
-      "prerequisites": "with code execution inside the ECS container (e.g., via container escape or supply chain attack)",
-      "threatAction": "access the ECS task role credentials from the container metadata service to gain direct access to Bedrock, S3, DynamoDB, and KMS",
-      "threatImpact": "full access to all AWS services the task role can access, including customer source code in S3 and Bedrock model invocation",
+      "prerequisites": "with code execution inside the agent container (e.g., via a supply chain attack)",
+      "threatAction": "access the Amazon Bedrock AgentCore Runtime execution role credentials to gain access to Amazon Bedrock, Amazon S3, and AWS KMS",
+      "threatImpact": "full access to all AWS services the execution role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation",
       "impactedGoal": [],
-      "impactedAssets": ["A012"],
-      "statement": "A An attacker with code execution inside the ECS container (e.g., via container escape or supply chain attack) can access the ECS task role credentials from the container metadata service to gain direct access to Bedrock, S3, DynamoDB, and KMS, which leads to full access to all AWS services the task role can access, including customer source code in S3 and Bedrock model invocation",
-      "displayOrder": 7,
+      "impactedAssets": [
+        "A012"
+      ],
+      "statement": "An attacker with code execution inside the agent container (e.g., via a supply chain attack) can access the Amazon Bedrock AgentCore Runtime execution role credentials to gain access to Amazon Bedrock, Amazon S3, and AWS KMS, which leads to full access to all AWS services the execution role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation",
+      "displayOrder": 6,
       "status": "threatIdentified",
-      "tags": ["IAM", "credential-theft", "container"],
+      "tags": [
+        "IAM",
+        "credential-theft",
+        "agent-runtime"
+      ],
       "metadata": []
     },
     {
       "id": "24025a34-da33-4662-8d86-d03e4c458a47",
-      "numericId": 8,
+      "numericId": 7,
       "threatSource": "A malicious user",
       "prerequisites": "with authenticated access to the system",
       "threatAction": "inject crafted input to create misleading log entries or deny performing actions when audit trails are insufficient",
@@ -281,74 +289,80 @@
       "impactedGoal": [],
       "impactedAssets": [],
       "statement": "A A malicious user with authenticated access to the system can inject crafted input to create misleading log entries or deny performing actions when audit trails are insufficient, which leads to inability to attribute malicious actions to specific users, corrupted audit trails, or false log entries that mislead incident response",
-      "displayOrder": 8,
+      "displayOrder": 7,
       "status": "threatIdentified",
-      "tags": ["logging", "log-injection", "audit"],
+      "tags": [
+        "logging",
+        "log-injection",
+        "audit"
+      ],
       "metadata": []
     },
     {
       "id": "2c9ed6d7-25d6-438d-b6e0-74d03a9a3c2c",
-      "numericId": 9,
+      "numericId": 8,
       "threatSource": "A malicious IDE plugin or compromised MCP client",
       "prerequisites": "with access to the local developer machine running the MCP server",
       "threatAction": "exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal",
       "threatImpact": "access to sensitive files on the developer's machine beyond the intended codebase scope",
       "impactedGoal": [],
-      "impactedAssets": ["A008"],
+      "impactedAssets": [
+        "A008"
+      ],
       "statement": "A A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope",
-      "displayOrder": 9,
+      "displayOrder": 8,
       "status": "threatIdentified",
-      "tags": ["MCP", "local", "file-access"],
+      "tags": [
+        "MCP",
+        "local",
+        "file-access"
+      ],
       "metadata": []
     },
     {
       "id": "d32e51df-5b63-4027-b8fb-17d14b002ad0",
-      "numericId": 10,
+      "numericId": 9,
       "threatSource": "An external attacker",
-      "prerequisites": "with network access to the CloudFront endpoint",
-      "threatAction": "open many concurrent WebSocket connections to exhaust ECS Fargate container memory (in-memory session store) or trigger excessive Bedrock API calls, causing resource exhaustion or cost escalation",
-      "threatImpact": "service unavailability for legitimate users, excessive AWS costs from Bedrock API abuse, or container OOM crashes",
+      "prerequisites": "with authenticated access to the AgentCore Runtime endpoint",
+      "threatAction": "open many concurrent sessions or send high-volume invocations to trigger excessive Amazon Bedrock API calls, causing cost escalation",
+      "threatImpact": "excessive AWS costs from Amazon Bedrock API abuse, or throttling that degrades service for legitimate users",
       "impactedGoal": [],
       "impactedAssets": [],
-      "statement": "A An external attacker with network access to the CloudFront endpoint can open many concurrent WebSocket connections to exhaust ECS Fargate container memory (in-memory session store) or trigger excessive Bedrock API calls, causing resource exhaustion or cost escalation, which leads to service unavailability for legitimate users, excessive AWS costs from Bedrock API abuse, or container OOM crashes",
-      "displayOrder": 10,
+      "statement": "An external attacker with authenticated access to the AgentCore Runtime endpoint can open many concurrent sessions or send high-volume invocations to trigger excessive Amazon Bedrock API calls, causing cost escalation, which leads to excessive AWS costs from Amazon Bedrock API abuse, or throttling that degrades service for legitimate users",
+      "displayOrder": 9,
       "status": "threatIdentified",
-      "tags": ["DoS", "WebSocket", "resource-exhaustion"],
+      "tags": [
+        "DoS",
+        "cost",
+        "resource-exhaustion"
+      ],
       "metadata": []
     },
     {
       "id": "23a2b84a-5c53-40ee-b90a-9b4106253f0c",
-      "numericId": 11,
+      "numericId": 10,
       "threatSource": "A malicious authenticated user",
       "prerequisites": "with valid authentication credentials",
       "threatAction": "access codebases and conversation histories belonging to other users since no role-based access control or resource-level authorization exists",
       "threatImpact": "unauthorized access to other users' proprietary source code and conversation data, violating data isolation in multi-tenant deployments",
       "impactedGoal": [],
-      "impactedAssets": ["A008", "A010"],
+      "impactedAssets": [
+        "A008",
+        "A010"
+      ],
       "statement": "A A malicious authenticated user with valid authentication credentials can access codebases and conversation histories belonging to other users since no role-based access control or resource-level authorization exists, which leads to unauthorized access to other users' proprietary source code and conversation data, violating data isolation in multi-tenant deployments",
-      "displayOrder": 11,
+      "displayOrder": 10,
       "status": "threatIdentified",
-      "tags": ["authorization", "RBAC", "multi-tenant"],
-      "metadata": []
-    },
-    {
-      "id": "3b1a46af-1f38-4264-89cf-09c4149d043a",
-      "numericId": 12,
-      "threatSource": "An insider with DynamoDB read access",
-      "prerequisites": "when DynamoDB conversation logging is enabled without CMK encryption",
-      "threatAction": "access conversation history stored in DynamoDB which may contain sensitive code snippets, proprietary logic, or security-relevant information discussed in chat",
-      "threatImpact": "exposure of sensitive conversation data including code snippets, architectural details, and security discussions",
-      "impactedGoal": [],
-      "impactedAssets": ["A010"],
-      "statement": "A An insider with DynamoDB read access when DynamoDB conversation logging is enabled without CMK encryption can access conversation history stored in DynamoDB which may contain sensitive code snippets, proprietary logic, or security-relevant information discussed in chat, which leads to exposure of sensitive conversation data including code snippets, architectural details, and security discussions",
-      "displayOrder": 12,
-      "status": "threatIdentified",
-      "tags": ["DynamoDB", "encryption", "conversation-history"],
+      "tags": [
+        "authorization",
+        "RBAC",
+        "multi-tenant"
+      ],
       "metadata": []
     },
     {
       "id": "27419327-b3b6-49dc-ae6e-b68e162a7da2",
-      "numericId": 13,
+      "numericId": 11,
       "threatSource": "A supply chain attacker",
       "prerequisites": "when third-party Python packages are installed in the Docker image",
       "threatAction": "compromise a third-party dependency (e.g., via typosquatting or package takeover) to inject malicious code into the container, gaining access to customer data and AWS credentials",
@@ -356,9 +370,13 @@
       "impactedGoal": [],
       "impactedAssets": [],
       "statement": "A A supply chain attacker when third-party Python packages are installed in the Docker image can compromise a third-party dependency (e.g., via typosquatting or package takeover) to inject malicious code into the container, gaining access to customer data and AWS credentials, which leads to full compromise of the application container, access to customer source code, IAM credentials, and ability to exfiltrate data",
-      "displayOrder": 13,
+      "displayOrder": 11,
       "status": "threatIdentified",
-      "tags": ["supply-chain", "dependency", "container"],
+      "tags": [
+        "supply-chain",
+        "dependency",
+        "container"
+      ],
       "metadata": []
     }
   ]

@@ -7,8 +7,9 @@ window.RUNTIME_CONFIG = {
   awsRegion: "REPLACE_WITH_REGION",
   userPoolId: "REPLACE_WITH_USER_POOL_ID",
   userPoolClientId: "REPLACE_WITH_CLIENT_ID",
-  backendUrl: "/api",
-  websocketUrl: "/ws",
+  // AgentCore Runtime ARN — the frontend invokes the Runtime data-plane endpoint
+  // directly using this. Injected from the stack's AgentRuntimeArn output.
+  agentRuntimeArn: "REPLACE_WITH_AGENT_RUNTIME_ARN",
   appName: "IRIS", // 👈 EDIT THIS to change app name
 };
 console.log("🔧 Runtime config loaded:", window.RUNTIME_CONFIG);

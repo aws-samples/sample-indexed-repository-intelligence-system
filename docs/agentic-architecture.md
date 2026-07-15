@@ -221,12 +221,12 @@ The architecture leverages the Strands framework for:
 - **Conversation Management**: Built-in conversation handling
 - **Model Integration**: Seamless Amazon Bedrock model integration
 
-### 2. WebSocket Integration
+### 2. AgentCore Runtime Integration
 
-For real-time applications:
+For real-time applications, the agent is hosted on Amazon Bedrock AgentCore Runtime (`backend/agent_runtime.py`):
 
-- **Session Management**: Each WebSocket connection gets a unique agent session
-- **Streaming Responses**: Real-time response delivery
+- **Session Management**: Each `runtimeSessionId` gets its own isolated microVM and a per-session agent with in-memory conversation history
+- **Streaming Responses**: Real-time response delivery over Server-Sent Events
 - **Tool Visualization**: Live updates on tool usage
 - **Error Handling**: Graceful error recovery and user notification
 
@@ -313,7 +313,6 @@ Potential new specialized agents:
    - Ensure configuration files are properly formatted
 
 2. **Tool Execution Errors**
-   - Verify file permissions for editing operations
    - Check file paths and existence
    - Monitor token limits and context windows
 

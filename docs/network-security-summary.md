@@ -3,84 +3,73 @@
 
 # Network Security Implementation Summary
 
-## Changes Made
+This is a condensed companion to [network-security.md](network-security.md). IRIS is
+serverless: it runs on Amazon Bedrock AgentCore Runtime with an Amazon CloudFront + Amazon
+S3 static frontend. There is no customer-managed network layer (no VPC, subnets, security
+groups, NACLs, or NAT gateways) to configure.
 
-### 1. VPC Configuration
+## Network Model
 
-- **NAT Gateway** (kept at 1) - required for Cognito JWKS endpoint
-- **Added VPC Endpoints:**
-  - S3 Gateway Endpoint (free)
-  - Amazon Bedrock Runtime Interface Endpoint
-  - CloudWatch Logs Interface Endpoint
-  - ECR API Interface Endpoint
-  - ECR Docker Interface Endpoint
-
-### 2. ECS Task Security Group
-
-- **Removed default egress rule** (0.0.0.0/0 on all ports)
-- **Added restricted egress rules:**
-  - HTTPS (443) to VPC CIDR (for VPC endpoints)
-  - HTTPS (443) to internet (for Cognito JWKS - no VPC endpoint available)
-  - DNS (53) to VPC CIDR (for name resolution)
-  - Explicitly blocked port 25 (SMTP) to prevent email abuse
-
-### 3. Network Architecture
-
-**Before:**
+There are two independent, HTTPS-only paths from the browser:
 
 ```
-ECS Tasks → NAT Gateway → Internet → AWS Services
+Browser ──HTTPS──▶ Amazon CloudFront (OAC) ──▶ Private Amazon S3 bucket   (static React app)
+
+Browser ──HTTPS──▶ Amazon Bedrock AgentCore Runtime data-plane            (chat / API)
+                   └─ managed Cognito JWT authorizer validates the token
+                      before it reaches the per-session microVM
 ```
 
-**After:**
+- **Static frontend**: served from a private S3 bucket through CloudFront using Origin
+  Access Control (OAC). The bucket has `BlockPublicAccess.BLOCK_ALL` and is never public.
+- **Application traffic**: the browser invokes the AgentCore Runtime data-plane endpoint
+  directly. The managed Cognito JWT authorizer validates the bearer token before any request
+  reaches the agent container.
+- **Runtime network mode**: `PUBLIC`, managed by the AgentCore service. Each
+  `runtimeSessionId` runs in its own isolated microVM (dedicated CPU/memory/filesystem,
+  sanitized on termination).
 
-```
-ECS Tasks → VPC Endpoints → AWS Services (Amazon S3, Amazon Bedrock, Amazon CloudWatch, Amazon ECR)
-         → NAT Gateway → Internet → Amazon Cognito (JWKS validation)
-```
+## Security Controls
 
-## Security Improvements
-
-1. ✅ **Restricted Internet Access**: ECS tasks can only reach Cognito (HTTPS) and VPC endpoints
-2. ✅ **VPC Endpoints**: Most AWS service calls stay within AWS network (Amazon S3, Amazon Bedrock, Amazon CloudWatch, Amazon ECR)
-3. ✅ **Port 25 Blocked**: Email abuse prevention
-4. ✅ **Least Privilege**: Only business-justified network paths
-5. ✅ **Defense in Depth**: Multiple layers of network controls
-6. ⚠️ **Cognito Limitation**: Requires NAT Gateway (no VPC endpoint available)
-
-## Cost Impact
-
-| Item           | Before       | After        | Change            |
-| -------------- | ------------ | ------------ | ----------------- |
-| NAT Gateway    | $32.40/month | $32.40/month | $0                |
-| VPC Endpoints  | $0           | $57.60/month | +$57.60           |
-| Data Transfer  | Variable     | Reduced      | -$10-20           |
-| **Net Change** |              |              | **+$40-50/month** |
+1. ✅ **Authentication before compute**: the managed Cognito authorizer rejects
+   unauthenticated requests before they reach application code.
+2. ✅ **Private static origin**: CloudFront OAC + S3 Block Public Access; the frontend bucket
+   is never publicly reachable.
+3. ✅ **HTTPS/TLS everywhere in transit**: browser → CloudFront and browser → AgentCore
+   data plane are both HTTPS (TLS 1.2 minimum on CloudFront); agent → AWS services is HTTPS.
+4. ✅ **Least-privilege egress**: the AgentCore execution role scopes the agent to specific
+   Amazon Bedrock, Amazon S3, and telemetry actions/resources.
+5. ✅ **Session isolation**: per-session microVMs, sanitized on teardown.
+6. ⚠️ **AWS WAF is out of scope** for this proof-of-value (documented `AwsSolutions-CFR2`
+   suppression); access is gated by the Cognito authorizer at the Runtime layer.
 
 ## Compliance Status
 
-✅ **COMPLIANT** with network security requirements:
+✅ **COMPLIANT** with the network security objectives for a serverless deployment:
 
-- Inbound traffic restricted to CloudFront only
-- Outbound traffic restricted to VPC endpoints only
-- VPC endpoints used for all AWS service access
-- Port 25 (SMTP) explicitly blocked
-- VPC Flow Logs enabled for monitoring
+- Inbound application access restricted to authenticated requests (Cognito authorizer)
+- Static frontend origin kept private (CloudFront OAC only)
+- HTTPS/TLS 1.2+ enforced on all viewer and service traffic
+- Egress restricted by least-privilege IAM on the execution role
+- Workloads isolated per session (dedicated microVM)
 
 ## Deployment Notes
 
-**No application code changes required** - all changes are infrastructure-only.
+**No customer network configuration is required** — there is no VPC, security group, or NAT
+gateway to provision. The static frontend is built and synced to the S3 bucket by
+`deploy.sh` after the stack exists (so the AgentCore Runtime ARN can be injected into the
+frontend runtime config), and CloudFront is invalidated to serve the new build.
 
-**Testing checklist:**
+**Verification checklist:**
 
-1. Verify ECS tasks can start (ECR endpoints working)
-2. Verify application can call Amazon Bedrock API
-3. Verify logs appear in CloudWatch Logs
-4. Verify S3 access works (if using S3 mode)
-5. Verify no internet connectivity from tasks
+1. Confirm the frontend S3 bucket reports `BlockPublicAccess = ALL true`.
+2. Confirm the CloudFront distribution uses OAC and `REDIRECT_TO_HTTPS`.
+3. Confirm an unauthenticated call to the Runtime data-plane endpoint is rejected (401/403).
+4. Confirm an authenticated call (valid Cognito access token) streams SSE events.
+5. Confirm the execution role grants only the expected Bedrock/S3/telemetry permissions.
 
-## Files Modified
+## Files
 
-- `iris-aws/infra/stack.py` - VPC and security group configuration
-- `iris-aws/docs/network-security.md` - Detailed documentation (new)
-- `iris-aws/docs/network-security-summary.md` - This summary (new)
+- `infra/stack.py` — AgentCore Runtime, Cognito user pool, CloudFront + S3 frontend
+- `docs/network-security.md` — detailed documentation
+- `docs/network-security-summary.md` — this summary

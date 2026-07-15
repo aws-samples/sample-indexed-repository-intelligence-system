@@ -301,7 +301,7 @@ To verify your User Pool configuration:
 If you encounter issues not covered in this guide:
 
 1. **Check CloudWatch Logs**:
-   - Look for authentication-related errors in ECS task logs
+   - Look for authentication-related errors in the AgentCore Runtime logs (`/aws/bedrock-agentcore/runtimes/*`)
    - Check Lambda function logs if self-signup is enabled (disabled by default)
 
 2. **Verify Configuration**:

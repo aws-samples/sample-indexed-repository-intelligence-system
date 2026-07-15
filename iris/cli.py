@@ -5,6 +5,7 @@ IRIS CLI - Modern interface using the new architecture.
 """
 
 import click
+import os
 import sys
 import subprocess
 from pathlib import Path
@@ -39,7 +40,7 @@ def cli(ctx):
     "--skip-validation", is_flag=True, help="Skip tree validation confirmation"
 )
 def chat(codebase, context, skip_validation):
-    """Start interactive chat with file editing capabilities."""
+    """Start interactive chat."""
 
     # Validate tree and get user confirmation
     if not _validate_tree_with_confirmation(codebase, skip_validation):
@@ -157,13 +158,13 @@ def ui():
         """Clean up the backend process"""
         nonlocal backend_process
         if backend_process and backend_process.poll() is None:
-            print("\n🛑 Stopping WebSocket server...")
+            print("\n🛑 Stopping AgentCore Runtime server...")
             backend_process.terminate()
             try:
                 backend_process.wait(timeout=5)
-                print("✅ WebSocket server stopped")
+                print("✅ AgentCore Runtime server stopped")
             except subprocess.TimeoutExpired:
-                print("⚠️  Force killing WebSocket server...")
+                print("⚠️  Force killing AgentCore Runtime server...")
                 backend_process.kill()
                 backend_process.wait()
 
@@ -235,10 +236,10 @@ def ui():
             print(f"❌ package.json not found in: {react_app_path}")
             sys.exit(1)
 
-        # Check if websocket_server.py exists
-        websocket_server_path = backend_path / "websocket_server.py"
-        if not websocket_server_path.exists():
-            print(f"❌ WebSocket server not found: {websocket_server_path}")
+        # Check if the AgentCore Runtime entrypoint exists
+        agent_runtime_path = backend_path / "agent_runtime.py"
+        if not agent_runtime_path.exists():
+            print(f"❌ Agent runtime not found: {agent_runtime_path}")
             sys.exit(1)
 
         # Install npm dependencies if needed
@@ -255,13 +256,23 @@ def ui():
                 print(f"❌ Error installing React dependencies: {e}")
                 sys.exit(1)
 
-        # Start WebSocket server in background
-        print("🔌 Starting WebSocket server...")
+        # Start AgentCore Runtime server in background (local dev). This is the
+        # SAME entrypoint deployed to AgentCore Runtime, so local matches cloud.
+        print("🔌 Starting AgentCore Runtime server...")
         try:
-            # Run the websocket server directly
+            # Local dev environment for the agent process:
+            # - CORS_ORIGINS: allow the React dev server (:3000) to call :8080.
+            # - ALLOW_ANONYMOUS: no Cognito locally; skip inbound auth.
+            agent_env = {
+                **os.environ,
+                "CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000",
+                "ALLOW_ANONYMOUS": "true",
+                "PORT": "8080",
+            }
             backend_process = subprocess.Popen(
-                ["python", str(websocket_server_path)],
+                ["python", str(agent_runtime_path)],
                 cwd=str(project_root),
+                env=agent_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Combine stderr with stdout
                 text=True,
@@ -269,8 +280,8 @@ def ui():
                 universal_newlines=True,
             )
 
-            # Wait for server to be ready (health check)
-            print("⏳ Waiting for WebSocket server to start...")
+            # Wait for server to be ready (health check on the AgentCore /ping route)
+            print("⏳ Waiting for AgentCore Runtime server to start...")
             max_attempts = 30
             server_output = []
 
@@ -282,7 +293,7 @@ def ui():
                     if remaining_output:
                         server_output.append(remaining_output)
 
-                    print("❌ WebSocket server process terminated unexpectedly:")
+                    print("❌ Agent runtime process terminated unexpectedly:")
                     print("Server output:")
                     for line in server_output:
                         print(f"  {line.strip()}")
@@ -302,16 +313,16 @@ def ui():
 
                 # Try health check
                 try:
-                    response = requests.get("http://localhost:8000/health", timeout=1)
+                    response = requests.get("http://localhost:8080/ping", timeout=1)
                     if response.status_code == 200:
-                        print("✅ WebSocket server is ready!")
+                        print("✅ AgentCore Runtime server is ready!")
                         break
                 except requests.exceptions.RequestException:
                     pass
 
                 time.sleep(1)
             else:
-                print("❌ WebSocket server failed to start within 30 seconds")
+                print("❌ Agent runtime server failed to start within 30 seconds")
                 print("Server output so far:")
                 for line in server_output:
                     print(f"  {line}")
@@ -319,14 +330,14 @@ def ui():
                 sys.exit(1)
 
         except Exception as e:
-            print(f"❌ Error starting WebSocket server: {e}")
+            print(f"❌ Error starting agent runtime server: {e}")
             cleanup_backend()
             sys.exit(1)
 
         # Launch React app in foreground
         try:
             print("🚀 Launching React UI...")
-            print("💡 Press Ctrl+C to stop both React app and WebSocket server")
+            print("💡 Press Ctrl+C to stop both React app and AgentCore Runtime server")
             subprocess.run(
                 ["npm", "run", "start", "--", "--open"],
                 cwd=str(react_app_path),

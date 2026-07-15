@@ -19,7 +19,7 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 
 ### High-Level Architecture
 
-![Architecture Diagram](images/arch.jpg)
+![Architecture Diagram](images/architecture.png)
 
 ### Key Architectural Principles
 
@@ -36,40 +36,39 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 
 #### React Application
 
-- **Technology**: React 18+ with TypeScript
-- **Hosting**: CloudFront CDN with S3 origin
+- **Technology**: React 18 (Vite build)
+- **Hosting**: Static site in a private Amazon S3 bucket, served through Amazon CloudFront with Origin Access Control (OAC)
 - **Features**:
-  - Real-time WebSocket communication
+  - Direct, streaming communication with the AgentCore Runtime over HTTPS (Server-Sent Events)
   - Responsive design for multiple devices
-  - Progressive Web App (PWA) capabilities
-  - Client-side routing and state management
+  - Client-side (SPA) routing, with Amazon CloudFront serving `/index.html` for 403/404 responses
+  - State management for conversations and tool activity
 
 #### Configuration Management
 
-- **Runtime Configuration**: Dynamic configuration loading
-- **Environment-Specific Settings**: Development, staging, and production configs
+- **Runtime Configuration**: A `runtime-config.js` file is injected at deploy time with the AWS region, Amazon Cognito user pool id, Amazon Cognito app client id, and the AgentRuntimeArn
+- **Environment-Specific Settings**: Development and cloud configurations
 - **Feature Flags**: Conditional feature enablement
 
 ### Backend Layer
 
-#### WebSocket Server
+#### AgentCore Runtime
 
-- **Technology**: FastAPI with WebSocket support
-- **Hosting**: AWS Fargate containers
+- **Technology**: Amazon Bedrock AgentCore Runtime — serverless and fully managed
+- **Entrypoint**: `backend/agent_runtime.py`, which implements the AgentCore HTTP protocol contract: `POST /invocations` (single request/response, with SSE streaming for chat) and `GET /ping` (health check), listening on port 8080
 - **Features**:
-  - Real-time bidirectional communication
-  - Session management and user isolation
-  - Streaming response handling
-  - Graceful connection handling
+  - Streaming response handling over Server-Sent Events
+  - Per-session isolation with no server infrastructure to manage
+  - Automatic scaling and lifecycle management by the Runtime
 
 #### Session Management
 
-- **Implementation**: In-memory hashmap with Redis backup (optional)
+- **Implementation**: Each `runtimeSessionId` is served by its own isolated microVM (dedicated CPU, memory, and filesystem). A per-session Strands agent lives in process for the life of that microVM, and a small `session_id -> Agent` cache lets multi-turn conversations reuse the same in-memory history.
 - **Features**:
-  - Unique session isolation
-  - Automatic cleanup on disconnect
-  - Session persistence across container restarts
-  - Multi-user concurrent support
+  - Strong isolation between sessions (one microVM per session)
+  - Session lifecycle managed by the AgentCore Runtime
+  - In-memory conversation history for multi-turn chat
+  - Concurrent sessions served independently
 
 ### AI Processing Layer
 
@@ -84,7 +83,7 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 
 #### Model Integration
 
-- **Primary Models**: Claude 4.5 Haiku and Sonnet via Amazon Bedrock
+- **Primary Models**: Claude (Haiku and Sonnet) via Amazon Bedrock
 - **Features**:
   - Multi-model support for different tasks
   - Regional distribution for performance
@@ -102,98 +101,96 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 #### Configuration Storage
 
 - **Application Config**: YAML files in version control
-- **Runtime Config**: Environment variables and parameter store
-- **User Data**: Cognito for user profiles and preferences
+- **Runtime Config**: Environment variables and the deploy-time-injected `runtime-config.js`
+- **User Data**: Amazon Cognito for user accounts
 
 ## AWS Services
 
 ### Compute Services
 
-#### AWS Fargate
+#### Amazon Bedrock AgentCore Runtime
 
-- **Purpose**: Container orchestration for backend services
+- **Purpose**: Serverless, fully managed hosting for the IRIS backend agent
 - **Configuration**:
-  - CPU: 1024-4096 units (1-4 vCPUs)
-  - Memory: 2048-8192 MB
-  - Health checks and automatic recovery
+  - Each `runtimeSessionId` runs in its own isolated microVM with dedicated CPU, memory, and filesystem
+  - `networkMode` = `PUBLIC`, `protocol` = `HTTP`
+  - Built from an ARM64 container image (the Runtime requires ARM64)
+  - Health checks via `GET /ping`; the Runtime handles scaling and session lifecycle
 
 #### AWS Lambda
 
-- **Purpose**: Cognito pre-signup validation (only when self-signup is enabled)
+- **Purpose**: A CDK-managed helper Lambda backs the S3 auto-delete custom resource used when the stack is torn down. A Cognito pre-signup validation Lambda is created only when self-signup is enabled.
 - **Note**: Self-signup is disabled by default; users are created via console
 
 ### Storage Services
 
 #### Amazon S3
 
-- **Buckets**:
-  - **Artifacts Bucket**: Codebase analysis artifacts
-  - **Static Assets**: Frontend static files (via CloudFront)
-  - **Access Logs**: Application Load Balancer and Amazon CloudFront access logs
+- **Buckets** (created by the stack):
+  - **FrontendBucket**: Private bucket holding the built React app, served through Amazon CloudFront via OAC
+  - **FrontendCloudFrontLogsBucket**: Amazon CloudFront access logs for the frontend distribution
+  - **ServerAccessLogsBucket**: S3 server access logs for the other buckets
+- **External bucket**: The codebase artifacts bucket (`codebase_artifacts.bucket` in `infra/config.yaml`) is pre-existing/external and is read by the Runtime in S3 mode; it is not created by the stack.
 - **Features**:
   - Server-side encryption (SSE-S3)
-  - Versioning for artifact management
+  - Block Public Access enabled on all buckets
+  - Versioning enabled
+  - TLS/HTTPS enforced via bucket policy (`enforce_ssl=True`)
 
 ### Networking Services
 
-#### Amazon VPC
-
-- **Configuration**:
-  - CIDR: 10.0.0.0/16 (configurable)
-  - Public subnets: 2 AZs for load balancer
-  - Private subnets: 2 AZs for application containers
-  - NAT Gateway for outbound internet access
-
-#### Application Load Balancer (ALB)
-
-- **Purpose**: Load balancing and SSL termination
-- **Features**:
-  - WebSocket support for real-time communication
-  - Health checks and automatic failover
-  - Integration with CloudFront
-  - SSL/TLS termination
+The backend runs on the AgentCore Runtime in `PUBLIC` network mode, so IRIS does not provision or manage any customer VPC, subnets, NAT gateways, load balancers, or security groups. Network access to the Runtime is gated by its built-in Amazon Cognito JWT authorizer.
 
 #### Amazon CloudFront
 
-- **Purpose**: Global content delivery network
+- **Purpose**: Global content delivery network for the static frontend
 - **Features**:
   - Global edge locations for low latency
-  - HTTPS enforcement and security headers
-  - Origin failover and caching strategies
-  - Integration with AWS WAF for security
+  - Private S3 origin secured with Origin Access Control (OAC)
+  - `REDIRECT_TO_HTTPS` viewer protocol policy and the managed `SECURITY_HEADERS` response headers policy
+  - TLS 1.2 (2021) minimum protocol version
+  - SPA routing: 403/404 responses return `/index.html` with a 200 status
+  - Access logging to a dedicated S3 bucket
+
+#### AgentCore Runtime Data-Plane Endpoint
+
+- **Purpose**: The browser invokes the AgentCore Runtime directly over HTTPS at the AWS data-plane endpoint (`https://bedrock-agentcore.{region}.amazonaws.com`)
+- **Features**:
+  - `POST /runtimes/{arn}/invocations?qualifier=DEFAULT` returns a Server-Sent Events stream for chat
+  - Cross-origin responses are handled by the AWS data-plane endpoint itself (it returns `access-control-allow-origin: *`), so the application never handles CORS
+  - TLS for all traffic
 
 ### Security Services
 
 #### Amazon Cognito
 
 - **Components**:
-  - **User Pool**: User authentication and management
-  - **Identity Pool**: Federated identity and access control
+  - **User Pool** (`IrisUserPool`): User authentication and management
+  - **User Pool Client** (`IrisClient`): Public client (no secret) used by the frontend; the app client id is the `allowedClients` value for the Runtime's JWT authorizer
 - **Features**:
-  - Multi-factor authentication (MFA)
-  - Social identity providers
-  - Custom authentication flows
-  - Domain-based access control
+  - Email- and username-based sign-in
+  - Email verification
+  - Password policy (minimum length and character-class requirements)
+  - The AgentCore Runtime's built-in JWT authorizer validates Cognito access tokens before requests reach the container
 
 #### AWS IAM
 
 - **Roles and Policies**:
-  - **ECS Task Role**: Permissions for application containers (Amazon Bedrock, S3)
-  - **Lambda Execution Role**: Permissions for Cognito pre-signup function (only if self-signup enabled)
-  - **CloudFormation Role**: Infrastructure deployment permissions
+  - **AgentCore Execution Role**: Trusts `bedrock-agentcore.amazonaws.com`; grants Amazon Bedrock invoke (`bedrock:Invoke*`, `bedrock:Converse*`) plus optional Bedrock guardrail and optional Amazon S3 read (for the codebase artifacts bucket in S3 mode). CloudWatch Logs, AWS X-Ray, and AgentCore workload-identity permissions are added by the AgentCore Runtime L2 construct.
+  - **S3 Auto-Delete Custom Resource Role**: Used by the CDK helper Lambda that empties buckets on stack deletion
+  - **Lambda Execution Role**: Permissions for the Cognito pre-signup function (only if self-signup enabled)
 - **Security Features**:
   - Least privilege access
-  - Cross-service permissions
   - Temporary credentials
-  - Resource-based policies
+  - Resource-scoped policies where the service supports it
 
 ### AI/ML Services
 
 #### Amazon Bedrock
 
 - **Models**:
-  - **Claude 3.5 Haiku**: Fast responses and file processing
-  - **Claude 3.5 Sonnet**: Complex reasoning and code generation
+  - **Claude Haiku**: Fast responses and file processing
+  - **Claude Sonnet**: Complex reasoning and code generation
 - **Features**:
   - Multiple regions for performance and availability
   - Prompt caching for efficiency
@@ -204,16 +201,12 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 
 #### Amazon CloudWatch
 
-- **Metrics**:
-  - Application performance metrics
-  - Infrastructure utilization
-  - Custom business metrics
-  - Real-time dashboards
+- **Metrics**: The AgentCore Runtime emits its own service metrics to CloudWatch. IRIS
+  does not define custom metrics, alarms, or dashboards in the stack.
 - **Logging**:
-  - Application logs from ECS containers
-  - ALB access logs
-  - CloudFront access logs
-  - Lambda function logs
+  - Application logs from the AgentCore Runtime (`/aws/bedrock-agentcore/runtimes/*`)
+  - AWS X-Ray traces from the Runtime
+  - Amazon CloudFront access logs (stored in S3)
 
 ## Deployment Architecture
 
@@ -237,35 +230,27 @@ IRIS is built as a cloud-native application leveraging AWS services for scalabil
 
 ### Container Strategy
 
-#### Docker Images
+#### Backend Container Image
 
-- **Backend**: Python-based container with FastAPI and WebSocket support
-- **Frontend**: Node.js-based container serving React application
-- **Registry**: Amazon ECR for image storage
+The backend is packaged as a single ARM64 container image that runs the AgentCore Runtime entrypoint (`backend/agent_runtime.py`) on port 8080. Two build variants are provided:
+
+- **`backend/Dockerfile.agentcore`** (bake-in mode): the codebase and its pre-generated representation are baked into the image at build time.
+- **`backend/Dockerfile.agentcore_s3`** (S3 mode): the image downloads the codebase index from Amazon S3 at boot via `backend/startup-s3-agentcore.sh`.
+
+The CDK `AgentRuntimeArtifact.from_asset(..., platform=LINUX_ARM64)` builds the image (the Runtime requires ARM64).
 
 #### Container Configuration
 
 ```yaml
-# Backend Container
-Resources:
-  CPU: 1024-2048 units (1-2 vCPU)
-  Memory: 2048-4096 MB
-  Environment Variables:
-    - AWS_REGION
-    - S3_BUCKET (if S3 mode enabled)
-    - S3_PREFIX (if S3 mode enabled)
-    - USER_POOL_ID
-    - USER_POOL_CLIENT_ID
-
-# Frontend Container
-Resources:
-  CPU: 256-1024 units (0.25-1 vCPU)
-  Memory: 512-2048 MB
-  Environment Variables:
-    - REACT_APP_AWS_REGION
-    - REACT_APP_USER_POOL_ID
-    - REACT_APP_USER_POOL_CLIENT_ID
+# Backend AgentCore Runtime container
+Image: ARM64, port 8080 (POST /invocations + GET /ping)
+Environment Variables:
+  - AWS_DEFAULT_REGION
+  - S3_BUCKET (if S3 mode enabled)
+  - S3_PREFIX (if S3 mode enabled)
 ```
+
+The frontend is not containerized: the React app is built with Vite and uploaded to the private `FrontendBucket`, then served through Amazon CloudFront.
 
 ## Security Architecture
 
@@ -273,10 +258,10 @@ Resources:
 
 #### Network Security
 
-1. **Amazon VPC Isolation**: All resources in private subnets
-2. **Security Groups**: Restrictive ingress/egress rules
-3. **NACLs**: Additional network-level controls
-4. **AWS WAF**: Web application firewall for CloudFront
+1. **Managed Runtime Boundary**: The backend runs on the AgentCore Runtime in `PUBLIC` network mode; there is no customer VPC, subnet, NAT gateway, load balancer, or security group to manage.
+2. **Authorizer-Gated Access**: The Runtime's built-in Amazon Cognito JWT authorizer validates tokens before any request reaches the container.
+3. **Private Frontend Origin**: The S3 frontend bucket is private and reachable only through Amazon CloudFront via Origin Access Control (OAC).
+4. **HTTPS Everywhere**: TLS is enforced for the CloudFront distribution and for the AgentCore data-plane endpoint.
 
 #### Application Security
 
@@ -296,32 +281,37 @@ Resources:
 
 #### Access Control
 
-- **CloudFront**: Public access to static assets and application
-- **ALB**: Restricted to CloudFront traffic only via prefix lists
-- **ECS Tasks**: No public access, private subnets only
-- **S3 Buckets**: Application access only, no public access
-- **Cognito**: User authentication (users created via console)
+- **Amazon CloudFront**: Public access to the static frontend
+- **AgentCore Runtime**: Reachable via the AWS data-plane endpoint; every invocation must carry a valid Amazon Cognito access token, which the Runtime's JWT authorizer verifies before the request reaches the container
+- **S3 Buckets**: Private, no public access; the frontend bucket is reachable only through Amazon CloudFront (OAC)
+- **Amazon Cognito**: User authentication (users created via console)
 
 ## Data Flow
 
 ### Request Processing Flow
 
+#### Frontend Delivery Flow
+
+```
+Browser → Amazon CloudFront (OAC) → Private S3 FrontendBucket → Static React App
+```
+
 #### User Authentication Flow
 
 ```
-User → CloudFront → ALB → ECS (Auth Check) → Cognito → Response
+Browser → Amazon Cognito (sign in) → Access Token → Bearer token on AgentCore invocations
 ```
 
-#### WebSocket Communication Flow
+#### Chat Communication Flow
 
 ```
-Client → CloudFront → ALB → ECS → Agent Processing → Amazon Bedrock → Response Stream
+Browser → AgentCore data-plane endpoint (Cognito JWT authorizer) → microVM (agent_runtime.py) → Agent Processing → Amazon Bedrock → SSE Response Stream
 ```
 
 #### File Processing Flow
 
 ```
-S3 Artifacts → ECS Container → File Analysis → Agent Processing → Response Generation
+S3 Artifacts (or baked-in index) → microVM filesystem → File Analysis → Agent Processing → Response Generation
 ```
 
 ### Data Processing Pipeline
@@ -337,12 +327,12 @@ S3 Artifacts → ECS Container → File Analysis → Agent Processing → Respon
 
 #### Real-time Query Processing
 
-1. **Query Reception**: User query received via WebSocket
+1. **Query Reception**: User query received by `POST /invocations` on the AgentCore Runtime
 2. **Context Loading**: Relevant codebase context loaded
 3. **Agent Orchestration**: Specialized agents selected and coordinated
 4. **Model Interaction**: Amazon Bedrock models called for processing
-5. **Response Streaming**: Real-time response streaming to client
-6. **Session Management**: Conversation state maintained
+5. **Response Streaming**: Response streamed back to the browser as Server-Sent Events
+6. **Session Management**: Conversation state maintained in the per-session microVM
 
 ## Related Documentation
 

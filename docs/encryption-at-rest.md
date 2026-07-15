@@ -86,14 +86,14 @@ codebase_artifacts:
 
 ### Step 4: Update AWS KMS Key Policy
 
-Your AWS KMS key policy must allow the ECS task role to decrypt objects. Add this statement to your key policy:
+Your AWS KMS key policy must allow the AgentCore Runtime execution role to decrypt objects. Add this statement to your key policy:
 
 ```json
 {
   "Sid": "AllowIrisDecrypt",
   "Effect": "Allow",
   "Principal": {
-    "AWS": "arn:aws:iam::account-id:role/IrisStack-TaskRole*"
+    "AWS": "arn:aws:iam::account-id:role/IrisStack-AgentCoreExecutionRole*"
   },
   "Action": ["kms:Decrypt", "kms:DescribeKey"],
   "Resource": "*"
@@ -113,7 +113,7 @@ cdk deploy
 
 ## IAM Permissions
 
-When you specify a `kms_key_arn` in the configuration, the ECS task role automatically receives these permissions:
+When you specify a `kms_key_arn` in the configuration, the AgentCore Runtime execution role automatically receives these permissions:
 
 - `kms:Decrypt` - Decrypt S3 objects encrypted with your customer managed AWS KMS key
 - `kms:DescribeKey` - Get key metadata
@@ -122,14 +122,25 @@ These permissions are scoped to only the AWS KMS key you specify.
 
 ## Service Data Encryption
 
-The following service data is encrypted using AWS-owned keys (not customer content):
+The following service data is encrypted at rest (not customer content):
 
-- **Amazon CloudWatch Logs** - Application logs (encrypted by default)
-- **Application Load Balancer Access Logs** - HTTP request metadata (encrypted by default)
-- **Amazon CloudFront Access Logs** - CDN request metadata (encrypted by default)
-- **Amazon VPC Flow Logs** - Network traffic metadata (encrypted by default)
+- **Amazon CloudWatch Logs** - Application logs (encrypted by default with AWS-owned keys)
+- **Amazon CloudFront Access Logs** - CDN request metadata, stored in Amazon S3 with SSE-S3
+- **Amazon S3 Server Access Logs** - Bucket access metadata, stored in Amazon S3 with SSE-S3
+
+The stack's own S3 buckets (server access logs, the frontend bucket, and the CloudFront
+access logs bucket) all use Amazon S3-managed encryption (SSE-S3), block all public access,
+enable versioning, and enforce TLS for access.
 
 These do not contain customer content and do not require customer managed AWS KMS key configuration.
+
+## Runtime Filesystem
+
+IRIS runs on Amazon Bedrock AgentCore Runtime. Each session executes in its own isolated
+microVM with a dedicated, ephemeral filesystem. The microVM and its memory are sanitized on
+session termination, so no per-session working data persists after a session ends. Any
+codebase artifacts that need to survive across sessions live in the customer's Amazon S3
+bucket, which is encrypted at rest as described above.
 
 ## Compliance
 
@@ -172,9 +183,9 @@ All AWS KMS operations are logged to CloudTrail. You can monitor:
 
 ### Error: Access Denied when reading S3 objects
 
-**Cause:** ECS task role doesn't have permission to use the AWS KMS key.
+**Cause:** The AgentCore Runtime execution role doesn't have permission to use the AWS KMS key.
 
-**Solution:** Update your AWS KMS key policy to allow the ECS task role (see Step 4 above).
+**Solution:** Update your AWS KMS key policy to allow the AgentCore Runtime execution role (see Step 4 above).
 
 ### Error: AWS KMS key not found
 

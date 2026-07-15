@@ -26,23 +26,20 @@
 
 ## 1. System Overview
 
-IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. Users upload codebases to Amazon S3; the system generates summaries and context using Amazon Bedrock (Claude models) and provides a real-time WebSocket-based chat interface for querying code.
+IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. Users upload codebases to Amazon S3; the system generates summaries and context using Amazon Bedrock (Claude models). The agent runs on Amazon Bedrock AgentCore Runtime — a serverless, fully managed backend — and the browser invokes the Runtime data-plane endpoint directly over HTTPS, streaming responses as Server-Sent Events (SSE).
 
 ### Components
 
-| ID   | Component                   | Technology                | Hosting                                     |
-| ---- | --------------------------- | ------------------------- | ------------------------------------------- |
-| C001 | React Frontend              | React 18+ / TypeScript    | Amazon CloudFront + S3                      |
-| C002 | Application Load Balancer   | AWS ALB                   | Public subnets (VPC)                        |
-| C003 | FastAPI WebSocket Server    | Python / FastAPI          | Amazon ECS on AWS Fargate (private subnets) |
-| C004 | Amazon Bedrock              | Claude 3.5 Haiku / Sonnet | AWS Managed                                 |
-| C005 | S3 Codebase Bucket          | Amazon S3                 | AWS Managed                                 |
-| C006 | DynamoDB Conversation Store | Amazon DynamoDB           | AWS Managed (optional)                      |
-| C007 | VPC Network                 | Amazon VPC (10.0.0.0/16)  | AWS Managed                                 |
-| C008 | Amazon Cognito              | Cognito User Pool         | AWS Managed                                 |
-| C009 | Amazon CloudWatch Logs      | CloudWatch                | AWS Managed                                 |
-| C010 | MCP Server                  | Python / stdio            | Local developer machine                     |
-| C011 | BedrockAgentCore Memory     | Amazon Bedrock AgentCore  | AWS Managed (optional)                      |
+| ID   | Component                    | Technology                | Hosting                                   |
+| ---- | ---------------------------- | ------------------------- | ----------------------------------------- |
+| C001 | React Frontend               | React 18+ / TypeScript    | Amazon CloudFront + private S3 (OAC)      |
+| C002 | Amazon Bedrock AgentCore Runtime | Python / Strands agent | AWS Managed (serverless, per-session microVM) |
+| C003 | Managed Cognito JWT Authorizer | AgentCore Runtime authorizer | AWS Managed                            |
+| C004 | Amazon Bedrock               | Claude models             | AWS Managed                               |
+| C005 | S3 Codebase Bucket           | Amazon S3                 | AWS Managed (external / pre-existing)     |
+| C006 | Amazon Cognito               | Cognito User Pool + Client | AWS Managed                              |
+| C007 | Amazon CloudWatch Logs       | CloudWatch                | AWS Managed                               |
+| C008 | MCP Server                   | Python / stdio            | Local developer machine                   |
 
 ---
 
@@ -56,17 +53,22 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 │  End users, browsers, IDE clients                                   │
 │                                                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  DMZ / Edge Layer (MEDIUM trust)                              │  │
-│  │  CloudFront CDN  ←→  Application Load Balancer               │  │
+│  │  Edge Layer (MEDIUM trust)                                    │  │
+│  │  CloudFront (HTTPS, OAC) → private S3 (static React app)      │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Managed Auth Boundary (enforced by AWS before compute)       │  │
+│  │  AgentCore Runtime managed Cognito JWT authorizer             │  │
 │  │                                                               │  │
 │  │  ┌─────────────────────────────────────────────────────────┐  │  │
-│  │  │  Application Layer — Private VPC (HIGH trust)           │  │  │
-│  │  │  ECS Fargate (FastAPI WebSocket Server)                 │  │  │
+│  │  │  Application Layer (HIGH trust) — AWS Managed           │  │  │
+│  │  │  AgentCore Runtime: per-session isolated microVM        │  │  │
+│  │  │  (dedicated CPU/memory/filesystem, sanitized on exit)   │  │  │
 │  │  │                                                         │  │  │
 │  │  │  ┌───────────────────────────────────────────────────┐  │  │  │
 │  │  │  │  AWS Managed Services (HIGH trust)                │  │  │  │
-│  │  │  │  Bedrock · S3 · DynamoDB · Cognito · CloudWatch   │  │  │  │
-│  │  │  │  BedrockAgentCore Memory (optional)               │  │  │  │
+│  │  │  │  Bedrock · S3 · Cognito · CloudWatch              │  │  │  │
 │  │  │  └───────────────────────────────────────────────────┘  │  │  │
 │  │  └─────────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
@@ -78,62 +80,52 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 ### Boundary Definitions
 
-| Boundary                   | Type     | Controls                                                          |
-| -------------------------- | -------- | ----------------------------------------------------------------- |
-| Internet → Edge            | Network  | CloudFront WAF, HTTPS/TLS 1.2+, security headers                  |
-| Edge → Application         | Network  | Security groups (ALB-only ingress), private subnets               |
-| Application → AWS Services | Network  | VPC endpoints, IAM task roles, TLS 1.2+, least-privilege policies |
-| Browser → Backend          | Protocol | JWT (RS256) via Amazon Cognito, WebSocket over WSS                |
-| Backend → AI Services      | Protocol | IAM task role, scoped to specific Bedrock model ARNs              |
-| Backend → AgentCore Memory | Protocol | IAM task role, HTTPS via VPC endpoint (optional feature)          |
-| Local → MCP Server         | Process  | stdio only; path containment enforced in three layers             |
+| Boundary                        | Type     | Controls                                                                        |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| Internet → CloudFront (frontend)| Network  | HTTPS/TLS 1.2+, security headers, private S3 origin via OAC                      |
+| Browser → AgentCore Runtime     | Protocol | HTTPS/TLS direct to the data-plane endpoint; managed Cognito JWT authorizer     |
+| Managed authorizer → container  | Protocol | Token cryptographically validated (issuer/signature/expiry, `allowedClients`) before reaching the agent |
+| Agent → AI Services             | Protocol | IAM execution role scoped to specific Bedrock inference-profile/model ARNs, TLS |
+| Agent → S3 (optional)           | Protocol | IAM execution role, read-only `GetObject`/`ListBucket` scoped to the bucket, TLS |
+| Local → MCP Server              | Process  | stdio only; path containment enforced in three layers                           |
 
 ---
 
 ## 3. Data Flows
 
-### DF1 — User Authentication
+### DF1 — Static Frontend Delivery
 
 ```
-Browser → CloudFront (HTTPS) → ALB (HTTP, AWS-internal) → ECS
-       → Cognito JWKS endpoint (HTTPS) → JWT claims returned to ECS
+Browser → CloudFront (HTTPS, OAC) → private S3 bucket → React app returned to Browser
 ```
 
-**Data in transit**: Cognito JWT (RS256), user credentials
-**Encrypted**: Yes (HTTPS end-to-end; ALB→ECS leg uses AWS Nitro System physical encryption)
+**Data in transit**: Static assets (HTML/JS/CSS), no user data
+**Encrypted**: Yes (HTTPS browser→CloudFront; CloudFront→S3 over HTTPS; S3 bucket private via OAC)
 
-### DF2 — WebSocket Chat Session
-
-```
-Browser → CloudFront (WSS) → ALB (WS, AWS-internal) → ECS
-       → Bedrock (HTTPS via VPC endpoint) → streaming response
-       → ECS → ALB → CloudFront → Browser
-```
-
-**Data in transit**: User queries (may contain code context), LLM responses
-**Encrypted**: Yes
-
-### DF3 — Codebase Upload and Analysis
+### DF2 — Authenticated Chat Session
 
 ```
-S3 Bucket → ECS (HTTPS via VPC endpoint)
-          → Bedrock (HTTPS via VPC endpoint) [summarization]
-          → S3 (HTTPS via VPC endpoint) [artifacts written back]
+Browser → AgentCore Runtime data-plane endpoint (HTTPS)
+          POST https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{arn}/invocations
+          Authorization: Bearer <Cognito access token>
+       → managed Cognito JWT authorizer validates the token (before the container)
+       → per-session microVM (agent) → Bedrock (HTTPS) → SSE stream back to Browser
+```
+
+**Data in transit**: Cognito access token, user queries (may contain code context), LLM responses
+**Encrypted**: Yes (HTTPS end to end, browser→data-plane; agent→Bedrock over TLS)
+
+### DF3 — Codebase Analysis
+
+```
+S3 Bucket (external) → agent microVM (HTTPS, read-only GetObject/ListBucket)
+                     → Bedrock (HTTPS) [summarization]
 ```
 
 **Data in transit**: Customer source code, analysis artifacts
-**Encrypted**: Yes; S3 SSE-S3 at rest (CMK optional)
+**Encrypted**: Yes; S3 SSE-S3 at rest (customer KMS CMK optional for the external bucket)
 
-### DF4 — Conversation Logging (optional)
-
-```
-ECS → DynamoDB (HTTPS via VPC endpoint) [async write, 90-day TTL]
-```
-
-**Data in transit**: Conversation messages (truncated at 8.5 KB per message)
-**Encrypted**: Yes; DynamoDB AWS-owned keys by default (CMK optional)
-
-### DF5 — MCP Server (local)
+### DF4 — MCP Server (local)
 
 ```
 IDE Plugin → MCP Server (stdio) → local file system
@@ -141,17 +133,6 @@ IDE Plugin → MCP Server (stdio) → local file system
 
 **Data in transit**: File paths, codebase content
 **Encrypted**: N/A (local process communication)
-
-### DF6 — AgentCore Memory (optional)
-
-```
-ECS → BedrockAgentCore Memory API (HTTPS via VPC endpoint) [per-message write]
-    → BedrockAgentCore Memory API (HTTPS via VPC endpoint) [session load on agent init]
-```
-
-**Data in transit**: Full conversation message content (role + text), truncated to 500 chars if >8.5 KB
-**Encrypted**: Yes; managed by BedrockAgentCore service
-**Note**: This is an optional feature enabled only when `MemoryHookProvider` is configured. When active, conversation content is stored in an external AWS-managed service outside the application's DynamoDB table.
 
 ---
 
@@ -170,36 +151,33 @@ STRIDE categories applied to each trust boundary and component:
 
 ### STRIDE Matrix
 
-| Component / Boundary          | S                         | T                   | R                  | I                           | D                     | E                     |
-| ----------------------------- | ------------------------- | ------------------- | ------------------ | --------------------------- | --------------------- | --------------------- |
-| Browser ↔ Backend (WebSocket) | T6 (JWT replay)           | —                   | T8 (log injection) | T5 (XSS)                    | T10 (DoS)             | T11 (no RBAC)         |
-| Backend ↔ Bedrock             | T2 (prompt injection)     | —                   | —                  | T2 (data exfil)             | T10 (cost escalation) | T2 (agent tool abuse) |
-| Backend ↔ S3                  | T3 (IAM misconfiguration) | —                   | —                  | T3 (direct bucket access)   | —                     | T7 (task role theft)  |
-| CloudFront → ALB (HTTP)       | —                         | T4 (interception)   | —                  | T4 (token exposure)         | —                     | —                     |
-| ECS Container                 | T7 (credential theft)     | —                   | —                  | T7 (IAM abuse)              | —                     | T7 (container escape) |
-| MCP Server (local)            | —                         | T9 (path traversal) | —                  | T9 (file disclosure)        | —                     | T9 (scope escape)     |
-| Cognito / Auth                | T1 (anon bypass)          | —                   | —                  | T6 (token replay)           | —                     | T1 (auth bypass)      |
-| DynamoDB / AgentCore Memory   | —                         | —                   | T8                 | T12 (conversation exposure) | —                     | —                     |
-| Supply Chain                  | T13 (dep compromise)      | T13                 | —                  | T13                         | —                     | T13                   |
-| Debug Endpoints               | T14 (misconfiguration)    | —                   | —                  | T14 (session info leak)     | —                     | T14                   |
+| Component / Boundary           | S                         | T                   | R                  | I                         | D                     | E                          |
+| ------------------------------ | ------------------------- | ------------------- | ------------------ | ------------------------- | --------------------- | -------------------------- |
+| Browser ↔ AgentCore Runtime    | T6 (JWT replay)           | T4 (interception)   | T8 (log injection) | T5 (XSS)                  | T10 (DoS)             | T11 (no RBAC)              |
+| Agent ↔ Bedrock                | T2 (prompt injection)     | —                   | —                  | T2 (data exfil)           | T10 (cost escalation) | T2 (agent tool abuse)      |
+| Agent ↔ S3                     | T3 (IAM misconfiguration) | —                   | —                  | T3 (direct bucket access) | —                     | T7 (execution-role abuse)  |
+| AgentCore microVM / agent code | T7 (execution-role abuse) | —                   | —                  | T7 (IAM abuse)            | —                     | T7 (agent-code compromise) |
+| MCP Server (local)             | —                         | T9 (path traversal) | —                  | T9 (file disclosure)      | —                     | T9 (scope escape)          |
+| Cognito / Managed Authorizer   | T1 (anon bypass, local)   | —                   | —                  | T6 (token replay)         | —                     | T1 (auth bypass)           |
+| Supply Chain                   | T13 (dep compromise)      | T13                 | —                  | T13                       | —                     | T13                        |
 
 ---
 
 ## 5. Identified Threats and Mitigations
 
-### T1 — Authentication Bypass (Local/Docker Mode)
+### T1 — Authentication Bypass (Local Mode)
 
 | Field               | Detail                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------- |
 | **STRIDE**          | Spoofing, Elevation of Privilege                                                                  |
-| **Severity**        | Low (production not affected)                                                                     |
+| **Severity**        | Low (cloud not affected)                                                                          |
 | **Actor**           | Unauthenticated attacker                                                                          |
-| **Precondition**    | `USER_POOL_ID` / `USER_POOL_CLIENT_ID` env vars not set (local or Docker without Cognito)         |
-| **Attack**          | Backend falls back to `ALLOW_ANONYMOUS=true`, granting `sub: anonymous` claims to all connections |
-| **Impact**          | Full unauthenticated access to all features in local/dev environments                             |
-| **Affected Assets** | JWT tokens (A009)                                                                                 |
+| **Precondition**    | Running the agent locally with anonymous auth (`ALLOW_ANONYMOUS`), i.e. no managed authorizer     |
+| **Attack**          | In a local run the frontend detects `authEnabled === false` and sends no bearer token; there is no managed authorizer in front of the local process |
+| **Impact**          | Full unauthenticated access to all features in a local/dev environment                            |
+| **Affected Assets** | User identity / access tokens (A009)                                                              |
 
-**Mitigation**: CDK deployment always provisions Cognito and injects env vars into the ECS task — this path cannot be reached in cloud deployments. `ALLOW_ANONYMOUS` is explicitly documented as a dev-only flag with a warning log. **POC accepted risk** for local development.
+**Mitigation**: In the cloud, the AgentCore Runtime is created with a managed Cognito JWT authorizer (`RuntimeAuthorizerConfiguration.using_cognito(user_pool, [user_pool_client])`), which validates the bearer token before any request reaches the container — the anonymous path cannot be reached in the deployed Runtime. Anonymous access exists only for LOCAL runs (`ALLOW_ANONYMOUS`) and is documented as dev-only. **POC accepted risk** for local development.
 
 ---
 
@@ -210,15 +188,15 @@ STRIDE categories applied to each trust boundary and component:
 | **STRIDE**          | Tampering, Information Disclosure, Elevation of Privilege                                                                                                             |
 | **Severity**        | Critical                                                                                                                                                              |
 | **Actor**           | Authenticated user                                                                                                                                                    |
-| **Precondition**    | Authenticated WebSocket access                                                                                                                                        |
+| **Precondition**    | Authenticated access to the chat endpoint                                                                                                                             |
 | **Attack**          | Crafted prompts manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls |
 | **Impact**          | Unauthorized access to customer source code, system prompt exfiltration, unintended tool execution                                                                    |
 | **Affected Assets** | Customer source code (A008), LLM prompts/responses (A011)                                                                                                             |
 
 **Mitigations implemented**:
 
-- Amazon Bedrock Guardrails support is wired through `create_bedrock_agent()` and applied to model invocations when configured. Configuration is **opt-in**: the operator creates a Guardrail in the AWS Bedrock console (or via CDK) and sets `guardrail_id` in `infra/config.yaml`. When `guardrail_id` is set, `infra/stack.py` grants the ECS task role `bedrock:ApplyGuardrail` scoped to that ARN. Deployments without `guardrail_id` are unprotected at this layer — operators MUST configure a Guardrail before exposing the service to untrusted users.
-- Trust-hierarchy markers (`[BEGIN UNTRUSTED FILE DATA]` / `[END UNTRUSTED FILE DATA]`) wrap all user-supplied file content in system prompts
+- Amazon Bedrock Guardrails support is wired through the agent creation path (`iris/agentic_chat.py`) and applied to model invocations when configured. Configuration is **opt-in**: the operator creates a Guardrail in the Amazon Bedrock console (or via CDK) and sets `guardrail_id` in `infra/config.yaml`. When `guardrail_id` is set, `infra/stack.py` grants the AgentCore Runtime execution role `bedrock:ApplyGuardrail` scoped to that ARN. Deployments without `guardrail_id` are unprotected at this layer — operators MUST configure a Guardrail before exposing the service to untrusted users.
+- User-supplied file content is wrapped in explicit `<file_content>` markers in the prompt so the model can distinguish untrusted file data from instructions
 - File retrieval agent uses an allowlist-based file filter; path containment enforced before any file is read (see T9)
 - System prompt hardening with explicit instructions not to reveal internal prompts
 
@@ -240,26 +218,26 @@ STRIDE categories applied to each trust boundary and component:
 
 **Mitigations implemented**:
 
-- S3 Block Public Access enforced
-- Bucket access restricted to ECS task role only
-- VPC endpoint policy restricts S3 access to traffic originating from the VPC
-- SSE-S3 encryption at rest enforced
+- S3 Block Public Access enforced (all stack buckets use `BlockPublicAccess.BLOCK_ALL`)
+- The AgentCore execution role's S3 access is read-only (`GetObject`/`ListBucket`) and scoped to the specific codebase-artifacts bucket ARN
+- `enforce_ssl` requires TLS for bucket access
+- SSE-S3 encryption at rest enforced (customer KMS CMK optional for the external codebase bucket)
 
 ---
 
-### T4 — HTTP Interception Between CloudFront and ALB
+### T4 — Token / Response Interception in Transit
 
 | Field               | Detail                                                                        |
 | ------------------- | ----------------------------------------------------------------------------- |
 | **STRIDE**          | Information Disclosure, Tampering                                             |
-| **Severity**        | Medium                                                                        |
-| **Actor**           | Attacker with access to AWS internal network                                  |
-| **Precondition**    | Ability to intercept traffic on the CloudFront → ALB leg (HTTP, AWS-internal) |
-| **Attack**          | Capture JWT tokens, user queries, or AI responses in transit                  |
+| **Severity**        | Low                                                                           |
+| **Actor**           | Attacker positioned on the network path between the browser and AWS           |
+| **Precondition**    | Ability to intercept or tamper with browser ↔ AWS traffic                     |
+| **Attack**          | Capture the Cognito access token, user queries, or AI responses in transit    |
 | **Impact**          | Exposure of authentication tokens and sensitive code context                  |
-| **Affected Assets** | JWT tokens (A009), LLM prompts/responses (A011)                               |
+| **Affected Assets** | Access tokens (A009), LLM prompts/responses (A011)                            |
 
-**Mitigation**: This leg relies on AWS Nitro System physical encryption of the hypervisor network. End-to-end TLS from browser to CloudFront and from ECS to all AWS services is enforced. The CloudFront → ALB HTTP pattern is standard within AWS. **Accepted risk** — adding an HTTPS listener on the ALB is a future hardening option.
+**Mitigation**: All traffic is encrypted end to end with TLS. The browser reaches the static frontend over HTTPS (browser → CloudFront, `REDIRECT_TO_HTTPS`, TLS 1.2 minimum) and invokes the AgentCore Runtime data-plane endpoint (`https://bedrock-agentcore.{region}.amazonaws.com/...`) directly over HTTPS. There is no unencrypted internal hop between an edge tier and the application — the browser talks to the AWS data plane directly. The agent's calls to Amazon Bedrock and Amazon S3 also use TLS.
 
 ---
 
@@ -280,8 +258,8 @@ STRIDE categories applied to each trust boundary and component:
 - `rehype-raw` removed from the Markdown rendering pipeline (eliminates raw HTML passthrough)
 - ReactMarkdown configured with `skipHtml={true}` in `MessageBubble.jsx` so raw HTML in AI responses is not rendered
 - Mermaid diagrams initialized with `securityLevel: 'strict'` (no raw-HTML / `click` JavaScript handlers); rendered SVG is run through DOMPurify (SVG profile) before DOM insertion in `MermaidChart.jsx`
-- Backend CSP header enforced on all HTTP responses: `default-src 'self'; script-src 'self'; frame-ancestors 'none'` — no `unsafe-inline` or `unsafe-eval`
-- Additional headers: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`
+- Amazon CloudFront applies the AWS-managed `SECURITY_HEADERS` response headers policy to the static frontend (`X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `X-XSS-Protection: 1; mode=block`, `Referrer-Policy`, `Strict-Transport-Security`)
+- A Content-Security-Policy is applied to the static app for local development via `frontend/serve.json` (`frame-ancestors 'none'`); see [Security Headers Implementation](security-headers-implementation.md)
 
 ---
 
@@ -291,41 +269,43 @@ STRIDE categories applied to each trust boundary and component:
 | ------------------- | ------------------------------------------------------------------------------------------- |
 | **STRIDE**          | Spoofing, Information Disclosure                                                            |
 | **Severity**        | High                                                                                        |
-| **Actor**           | External attacker with a stolen JWT                                                         |
-| **Precondition**    | Attacker obtains a valid JWT (e.g., via network interception or XSS)                        |
-| **Attack**          | Replay the JWT to establish a WebSocket session and impersonate the legitimate user         |
-| **Impact**          | Full access to the impersonated user's session, codebase analysis, and conversation history |
-| **Affected Assets** | JWT tokens (A009)                                                                           |
+| **Actor**           | External attacker with a stolen access token                                                |
+| **Precondition**    | Attacker obtains a valid Cognito access token (e.g., via network interception or XSS)       |
+| **Attack**          | Replay the access token as a bearer token to invoke the Runtime and impersonate the user    |
+| **Impact**          | Full access to the impersonated user's session and codebase analysis                        |
+| **Affected Assets** | Access tokens (A009)                                                                        |
 
 **Mitigations implemented**:
 
-- JWKS TTL cache (5-minute proactive refresh) with monotonic clock to prevent stale key acceptance
-- Unknown `kid` refresh throttled to once per minute to prevent DoS via crafted tokens
-- Session TTL of 1 hour with idle eviction; maximum 100 concurrent sessions enforced by `SessionManager`
-- Cognito tokens include `exp` claim; `verify_exp=True` enforced in `jwt.decode`
-- `token_use` claim validated — only `access` or `id` tokens accepted
+- The AgentCore Runtime's managed Cognito JWT authorizer validates the bearer token cryptographically (issuer, RS256 signature, and expiry) against the Cognito user pool's OIDC discovery document, and matches `allowedClients` against the token's `client_id` claim — this happens before the request reaches the container, so token verification is handled by the managed layer rather than application code
+- The frontend sends the Cognito **access token** (carries `client_id`), not the ID token, so the authorizer's `allowedClients` check is enforced
+- Cognito access tokens are short-lived and carry an `exp` claim; expired tokens are rejected by the authorizer
+- Tokens are held in browser memory (via the Amplify auth session), not in `localStorage` or cookies, reducing theft surface
+- Transport is HTTPS end to end (see T4), limiting interception opportunities
 
 ---
 
-### T7 — ECS Task Role Credential Theft
+### T7 — Agent-Code Compromise / Execution-Role Abuse
 
 | Field               | Detail                                                                                                                         |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | **STRIDE**          | Elevation of Privilege, Information Disclosure                                                                                 |
-| **Severity**        | Critical                                                                                                                       |
-| **Actor**           | Attacker with code execution inside the ECS container                                                                          |
-| **Precondition**    | Container escape or supply chain compromise (see T13)                                                                          |
-| **Attack**          | Query the ECS container metadata endpoint to obtain task role credentials, then access Bedrock, S3, DynamoDB, and KMS directly |
-| **Impact**          | Full access to all AWS services the task role can reach, including customer source code                                        |
-| **Affected Assets** | IAM task role credentials (A012)                                                                                               |
+| **Severity**        | High                                                                                                                           |
+| **Actor**           | Attacker who achieves code execution in the agent process                                                                      |
+| **Precondition**    | Supply chain compromise (see T13) or a successful code-execution exploit against the agent                                    |
+| **Attack**          | Abuse the AgentCore Runtime execution-role credentials available to the agent process to call Amazon Bedrock, Amazon S3, and (if configured) AWS KMS |
+| **Impact**          | Access limited to the AWS services and resources the execution role is scoped to, including read access to customer source code |
+| **Affected Assets** | IAM execution-role credentials (A012)                                                                                          |
 
 **Mitigations implemented**:
 
-- IAM task role scoped to specific Bedrock inference profile ARNs and foundation model ARNs (not `bedrock:*`)
-- Bedrock Guardrail permission scoped to the specific Guardrail ARN
-- S3 access restricted to the specific codebase bucket ARN
-- DynamoDB access restricted to the specific table ARN
-- Container runs as non-root user
+- The AgentCore Runtime runs each session in an isolated, AWS-managed microVM; there is no customer-managed EC2-style instance metadata service to harvest, and the microVM is sanitized on session termination
+- Execution role scoped to specific Bedrock inference-profile and foundation-model ARNs (not `bedrock:*`); the model/region wildcard carries a documented `AwsSolutions-IAM5` cdk-nag suppression
+- Bedrock Guardrail permission (when configured) scoped to the specific Guardrail ARN
+- S3 access is read-only and scoped to the specific codebase-artifacts bucket ARN
+- KMS `Decrypt`/`DescribeKey` (when a CMK is configured) scoped to the specific key ARN
+- CloudWatch Logs / X-Ray / workload-identity permissions are construct-managed with documented cdk-nag suppressions for the unavoidable wildcards
+- Agent container runs as a non-root user (`appuser`)
 
 ---
 
@@ -360,7 +340,7 @@ STRIDE categories applied to each trust boundary and component:
 | **Actor**           | Malicious IDE plugin, compromised MCP client, or crafted prompt via T2                       |
 | **Precondition**    | Ability to supply an arbitrary file path to any file-reading function                        |
 | **Attack**          | Supply a path like `../../etc/passwd` to read files outside the intended codebase directory  |
-| **Impact**          | Access to sensitive files on the developer's machine (MCP) or on the ECS container (backend) |
+| **Impact**          | Access to sensitive files on the developer's machine (MCP) or within the agent microVM (backend) |
 | **Affected Assets** | Customer source code (A008), local credentials                                               |
 
 **Mitigations implemented — three independent layers**:
@@ -373,27 +353,26 @@ MCP server communicates via stdio only — no network port exposed.
 
 ---
 
-### T10 — WebSocket DoS / Bedrock Cost Escalation
+### T10 — Invocation Flooding / Bedrock Cost Escalation
 
 | Field               | Detail                                                                                                                                   |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | **STRIDE**          | Denial of Service                                                                                                                        |
 | **Severity**        | High                                                                                                                                     |
-| **Actor**           | External attacker with CloudFront access                                                                                                 |
-| **Precondition**    | Network access to the CloudFront endpoint                                                                                                |
-| **Attack**          | Open many concurrent WebSocket connections or flood chat messages to exhaust ECS container memory or trigger excessive Bedrock API calls |
-| **Impact**          | Service unavailability for legitimate users, excessive AWS costs                                                                         |
-| **Affected Assets** | Service availability                                                                                                                     |
+| **Actor**           | Authenticated user (or holder of a valid access token)                                                                                   |
+| **Precondition**    | A valid Cognito access token accepted by the managed authorizer                                                                          |
+| **Attack**          | Send a high volume of invocations (many sessions or rapid repeated prompts) to drive excessive Amazon Bedrock API calls and cost         |
+| **Impact**          | Excessive AWS costs (primarily Amazon Bedrock usage); degraded experience                                                                |
+| **Affected Assets** | Service availability, AWS spend                                                                                                          |
 
-**Mitigations implemented**:
+**Mitigations implemented / properties**:
 
-- Token-bucket rate limiter: 10 messages/minute per session (burst of 10), enforced in `websocket_server.py`
-- Maximum 100 concurrent sessions enforced by `SessionManager`; idle sessions evicted after 1 hour
-- 64 KB WebSocket message size limit
-- WebSocket `/ws` upgrades validate the `Origin` header against the CORS allowlist before accepting; cross-origin browser connections are rejected with close code 1008
-- `CORS_ORIGINS` is automatically wired to the CloudFront distribution URL via CDK L1 override at deployment time, ensuring the Origin allowlist includes the correct cloud endpoint
+- Unauthenticated requests are rejected by the managed Cognito JWT authorizer before reaching the agent, so anonymous flooding of the compute layer is not possible
+- The AgentCore Runtime is serverless and scales per-session isolated microVMs, so one abusive session cannot exhaust a fixed-size, shared in-memory server the way a single long-lived container could — the resource-exhaustion concern shifts from container memory to per-session invocation volume and downstream Amazon Bedrock cost
+- Amazon Bedrock enforces account-level model invocation quotas, which bound the blast radius of runaway usage
+- Optional Amazon Bedrock Guardrails add per-invocation checks when configured
 
-**Residual risk — CloudFront WAF**: No `aws_wafv2` web ACL is attached to the CloudFront distribution. cdk-nag finding `AwsSolutions-CFR2` is **POC accepted risk** — the deployment is gated behind Cognito auth and the rate limiter, and L7 edge protection is deferred to post-POC hardening. Operators MUST attach a WAF web ACL before exposing the distribution to anonymous internet traffic at scale.
+**Residual risk — rate limiting / WAF**: There is no application-level per-session rate limiter, and no `aws_wafv2` web ACL is attached to the CloudFront distribution (cdk-nag finding `AwsSolutions-CFR2`, documented and accepted for this proof-of-value — access is gated by the Cognito authorizer at the Runtime layer). Operators SHOULD add throttling (for example, via a WAF rate-based rule on the frontend and Amazon Bedrock quota/budget alarms) and MUST review cost controls before exposing the service broadly. **POC accepted risk.**
 
 ---
 
@@ -413,27 +392,25 @@ MCP server communicates via stdio only — no network port exposed.
 
 ---
 
-### T12 — Conversation Data Exposure (DynamoDB and AgentCore Memory)
+### T12 — Conversation Data Exposure
 
-| Field               | Detail                                                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **STRIDE**          | Information Disclosure                                                                                                                                 |
-| **Severity**        | Medium                                                                                                                                                 |
-| **Actor**           | Insider with DynamoDB or AgentCore Memory read access                                                                                                  |
-| **Precondition**    | Conversation logging or AgentCore Memory enabled                                                                                                       |
-| **Attack**          | Read conversation history from DynamoDB or AgentCore Memory, which may contain sensitive code snippets, architectural details, or security discussions |
-| **Impact**          | Exposure of sensitive conversation data                                                                                                                |
-| **Affected Assets** | Conversation history (A010)                                                                                                                            |
+| Field               | Detail                                                                                                                          |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| **STRIDE**          | Information Disclosure                                                                                                          |
+| **Severity**        | Low                                                                                                                            |
+| **Actor**           | Attacker who compromises the agent process, or an insider with Amazon Bedrock access                                          |
+| **Precondition**    | Access to the running agent process, or to Amazon Bedrock request logging in the account                                      |
+| **Attack**          | Read in-flight conversation content (which may contain sensitive code snippets, architectural details, or security discussions) |
+| **Impact**          | Exposure of sensitive conversation data                                                                                        |
+| **Affected Assets** | Conversation history (A010)                                                                                                    |
 
-**Mitigations implemented**:
+**Mitigations / properties**:
 
-- DynamoDB encrypted with AWS-owned keys by default; CMK available as opt-in
-- DynamoDB records have a 90-day TTL (`expiry_ttl`) enforced by `DynamoDBMessageLogger`
-- Messages exceeding 8.5 KB are truncated before storage (both DynamoDB and AgentCore Memory paths)
-- Local conversation history files have permissions restricted to owner (`0o600`)
-- AgentCore Memory is an optional feature; disabled by default
+- **No persistent conversation store is deployed.** The current stack provisions no Amazon DynamoDB table and no AgentCore Memory resource. Conversation history exists only in the memory of the per-session AgentCore microVM for the life of that session.
+- Each session's microVM (including its memory) is isolated and sanitized on session termination, so conversation content does not persist or leak across sessions after teardown.
+- Optional persistence capabilities exist in the codebase (a DynamoDB message logger and an AgentCore Memory hook provider) but are **not** wired into the deployed agent and are **not** provisioned by the stack. If an operator later enables either, conversation content would be stored in an external AWS-managed service and MUST be protected accordingly (encryption, retention/TTL, and CMK for sensitive data).
 
-**Residual risk**: CMK encryption not enforced by default for DynamoDB. **POC accepted risk**.
+**Residual risk**: Conversation content is sent to Amazon Bedrock for inference (see A003) and is present in agent memory during processing. **POC accepted risk.**
 
 ---
 
@@ -460,25 +437,25 @@ MCP server communicates via stdio only — no network port exposed.
 
 ---
 
-### T14 — Debug Endpoint Information Disclosure
+### T14 — Auxiliary Read Action Information Disclosure
 
 | Field               | Detail                                                                                                     |
 | ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **STRIDE**          | Information Disclosure, Elevation of Privilege                                                             |
+| **STRIDE**          | Information Disclosure                                                                                     |
 | **Severity**        | Low                                                                                                        |
-| **Actor**           | Authenticated attacker or misconfigured deployment                                                         |
-| **Precondition**    | `ENABLE_DEBUG_ENDPOINTS=true` set in a non-development environment                                         |
-| **Attack**          | Access the `/sessions` endpoint to enumerate all active sessions, user info, and session metadata          |
-| **Impact**          | Exposure of active session IDs, user identifiers, and session timing data that could aid session hijacking |
-| **Affected Assets** | Session tokens (A003), user info (A002)                                                                    |
+| **Actor**           | Authenticated user                                                                                         |
+| **Precondition**    | A valid Cognito access token accepted by the managed authorizer                                            |
+| **Attack**          | Invoke the non-chat actions (`config`, `codebase_info`, `generate_context`) to read codebase metadata such as the codebase directory, file tree, and evaluation statistics |
+| **Impact**          | Exposure of codebase structure/metadata to any authenticated user                                          |
+| **Affected Assets** | Customer source code metadata (A008)                                                                       |
 
 **Mitigations implemented**:
 
-- `/sessions` endpoint is only registered when `ENABLE_DEBUG_ENDPOINTS=true` (disabled by default)
-- Endpoint requires authentication via `_require_auth_for_endpoint()` even when enabled
-- CDK deployment does not set `ENABLE_DEBUG_ENDPOINTS`
+- All actions are served through the same AgentCore Runtime entrypoint and are therefore gated by the managed Cognito JWT authorizer — unauthenticated callers cannot reach them
+- The actions return only codebase directory/metadata and best-effort statistics; there is no session-enumeration or user-listing endpoint in the Runtime
+- Errors are returned as generic messages and sanitized before logging (`security_utils.py`), avoiding leakage of internal details
 
-**Residual risk**: Misconfigured deployments that set `ENABLE_DEBUG_ENDPOINTS=true` in production expose session metadata. Operators must ensure this flag is not set outside local development.
+**Residual risk**: Because there is no per-user authorization (see T11), any authenticated user can read the single deployment's codebase metadata. **POC accepted risk** for single-tenant deployments.
 
 ---
 
@@ -486,13 +463,12 @@ MCP server communicates via stdio only — no network port exposed.
 
 The following risks are accepted for the POC release. They **must** be addressed before any multi-user or production deployment.
 
-| ID  | Threat                             | Severity | Acceptance Rationale                                                     | Pre-Production Action Required                                              |
-| --- | ---------------------------------- | -------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| T1  | Anonymous access in local/dev mode | Low      | By design for developer experience; CDK always enforces Cognito in cloud | Document clearly; enforce `ALLOW_ANONYMOUS=false` in any shared environment |
-| T4  | HTTP on CloudFront → ALB leg       | Medium   | AWS Nitro System provides physical encryption; standard AWS pattern      | Add HTTPS listener on ALB for end-to-end TLS                                |
-| T8  | Log injection (partial coverage)   | Medium   | `sanitize_for_log` covers most paths; structured logging deferred        | Migrate to structured JSON logging                                          |
-| T11 | No RBAC / multi-tenant isolation   | High     | Single-tenant POC only                                                   | Implement resource-level authorization before multi-user deployment         |
-| T12 | Conversation history without CMK   | Medium   | AWS-owned key encryption in place; CMK is opt-in                         | Enforce CMK for production deployments handling sensitive data              |
+| ID  | Threat                                | Severity | Acceptance Rationale                                                     | Pre-Production Action Required                                              |
+| --- | ------------------------------------- | -------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| T1  | Anonymous access in local mode        | Low      | By design for developer experience; the managed Cognito authorizer always gates the cloud Runtime | Document clearly; do not enable `ALLOW_ANONYMOUS` in any shared environment |
+| T8  | Log injection (partial coverage)      | Medium   | `sanitize_for_log` covers most paths; structured logging deferred        | Migrate to structured JSON logging                                          |
+| T10 | No rate limiting / WAF                 | High     | Access gated by Cognito authorizer; WAF out of scope for POV (`CFR2`)    | Add WAF rate-based rules and Amazon Bedrock quota/budget alarms             |
+| T11 | No RBAC / multi-tenant isolation      | High     | Single-tenant POC only                                                   | Implement resource-level authorization before multi-user deployment         |
 
 ---
 
@@ -500,12 +476,12 @@ The following risks are accepted for the POC release. They **must** be addressed
 
 | ID   | Category          | Assumption                                                                                   | Impact if False                                                                          |
 | ---- | ----------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| A001 | Authentication    | Amazon Cognito is properly configured in production with self-signup disabled                | Anonymous access to all features                                                         |
-| A002 | Network           | VPC endpoints are configured for all AWS service access (S3, Bedrock, CloudWatch, ECR)       | AWS service traffic traverses public internet via NAT Gateway                            |
+| A001 | Authentication    | Amazon Cognito is properly configured, self-signup disabled, and the AgentCore Runtime's managed Cognito authorizer is enabled in the cloud | Anonymous access to all features                                        |
+| A002 | Networking        | The AgentCore Runtime and its managed authorizer, plus CloudFront/S3 (OAC), provide the network isolation — there is no customer-managed VPC to configure | Reliance on AWS-managed network controls being correctly provisioned by the stack |
 | A003 | AWS Services      | Amazon Bedrock does not retain or use customer prompts for model training                    | Customer source code sent in prompts could be exposed                                    |
 | A004 | Authorization     | No RBAC exists — all authenticated users have equal access to all features and codebases     | Any authenticated user can access any codebase in multi-tenant scenarios                 |
-| A005 | Operations        | `ENABLE_DEBUG_ENDPOINTS` is not set to `true` in any non-development deployment              | Active session metadata exposed to authenticated users                                   |
-| A006 | Optional Features | AgentCore Memory and DynamoDB conversation logging are disabled unless explicitly configured | Conversation content stored in external services beyond the application's direct control |
+| A005 | Deployment        | The single deployment serves a single codebase (single-tenant)                               | Cross-tenant exposure if a shared deployment serves multiple codebases without RBAC      |
+| A006 | Optional Features | No persistent conversation store is deployed; the optional DynamoDB logger and AgentCore Memory hook are not wired in unless an operator explicitly enables them | If enabled, conversation content would be stored in an external service beyond the application's direct control |
 
 ---
 

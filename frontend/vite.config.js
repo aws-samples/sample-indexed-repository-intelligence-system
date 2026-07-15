@@ -8,17 +8,12 @@ export default defineConfig({
   server: {
     port: 3000,
     open: true,
+    // Note: the app invokes the AgentCore Runtime entrypoint directly at
+    // localAgentUrl (http://localhost:8080) in dev, so no proxy is required.
+    // This proxy is kept only as a convenience for any relative /invocations call.
     proxy: {
-      // Proxy API requests to the backend server
-      "/api": {
-        target: "http://localhost:8000",
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
-      },
-      // Proxy WebSocket connections
-      "/ws": {
-        target: "ws://localhost:8000",
-        ws: true,
+      "/invocations": {
+        target: "http://localhost:8080",
         changeOrigin: true,
       },
     },

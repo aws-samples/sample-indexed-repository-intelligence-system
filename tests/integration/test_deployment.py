@@ -126,7 +126,9 @@ class TestDockerBuild:
 
     def test_backend_dockerfile_valid(self):
         """Test backend Dockerfile syntax."""
-        dockerfile = Path(__file__).parent.parent.parent / "backend" / "Dockerfile"
+        dockerfile = (
+            Path(__file__).parent.parent.parent / "backend" / "Dockerfile.agentcore"
+        )
         assert dockerfile.exists()
 
         # Check if Docker daemon is running
@@ -154,7 +156,10 @@ class TestDockerBuild:
             ],
             cwd=dockerfile.parent.parent,
             capture_output=True,
-            timeout=300,
+            # The AgentCore image runs two apt-get upgrade passes, a full
+            # `uv sync --frozen`, and a recursive chown over the baked-in
+            # codebase, so a clean (--no-cache) build needs well over 300s.
+            timeout=900,
         )
         assert result.returncode == 0, (
             f"Backend Docker build failed: {result.stderr.decode()}"
@@ -212,10 +217,16 @@ class TestCDKSynthesis:
     def test_cdk_synth(self):
         """Test CDK synthesizes without errors."""
         import os
+        import sys
 
         infra_dir = Path(__file__).parent.parent.parent / "infra"
         env = os.environ.copy()
         env["AWS_DEFAULT_REGION"] = env.get("AWS_DEFAULT_REGION", "us-east-1")
+        # cdk.json runs "python app.py"; ensure the interpreter running the test
+        # suite (which has the project's CDK deps installed, e.g.
+        # aws_cdk.aws_bedrock_agentcore_alpha) is the one resolved on PATH.
+        venv_bin = str(Path(sys.executable).parent)
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
         result = subprocess.run(
             ["cdk", "synth", "--no-lookups"],
             cwd=infra_dir,

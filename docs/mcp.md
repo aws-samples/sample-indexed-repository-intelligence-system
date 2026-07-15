@@ -431,21 +431,6 @@ use codebase_query to explain: How do these components interact with each other?
 use codebase_query to identify: What are potential scalability bottlenecks in this architecture?
 ```
 
-### File Editing Capabilities
-
-When appropriate, the MCP server can suggest or perform file modifications:
-
-```
-use codebase_query to help: Add error handling to the user authentication function
-```
-
-**Capabilities**:
-
-- Analyze existing code
-- Suggest improvements
-- Generate code modifications
-- Provide implementation guidance
-
 ## Troubleshooting
 
 ### Common Issues

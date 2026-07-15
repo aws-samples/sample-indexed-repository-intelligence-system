@@ -13,15 +13,20 @@ export const getAppConfig = () => {
       import.meta.env.VITE_APP_NAME ||
       "IRIS",
 
-    // Backend URLs - runtime config (CDK) takes precedence, then env vars (dev), then defaults
-    backendUrl:
-      runtimeConfig?.backendUrl ||
-      import.meta.env.VITE_BACKEND_URL ||
-      (isDev ? "http://localhost:8000" : "/api"),
-    websocketUrl:
-      runtimeConfig?.websocketUrl ||
-      import.meta.env.VITE_WEBSOCKET_URL ||
-      (isDev ? "ws://localhost:8000/ws" : "/ws"),
+    // AgentCore Runtime — the browser invokes the Runtime data-plane endpoint
+    // directly using this ARN + region. Injected via window.RUNTIME_CONFIG (CDK)
+    // or VITE_AGENT_RUNTIME_ARN (env).
+    agentRuntimeArn:
+      runtimeConfig?.agentRuntimeArn ||
+      import.meta.env.VITE_AGENT_RUNTIME_ARN ||
+      "",
+
+    // Local dev only: when set, the client POSTs to this base URL's /invocations
+    // instead of the AWS data-plane endpoint (e.g. `python agent_runtime.py`).
+    localAgentUrl:
+      runtimeConfig?.localAgentUrl ||
+      import.meta.env.VITE_LOCAL_AGENT_URL ||
+      (isDev ? "http://localhost:8080" : ""),
 
     // Auth configuration - CDK always has auth, dev can disable it
     authEnabled: runtimeConfig

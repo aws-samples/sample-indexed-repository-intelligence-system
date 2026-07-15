@@ -34,7 +34,7 @@ This script provides 5 deployment options with guided setup for each.
 | **Local (No Docker)**              | Development, Testing      | Low        | Python, Node.js, AWS CLI | **Start here if new**                                |
 | **Local Docker (Local Artifacts)** | Integration Testing       | Medium     | Docker, Docker Compose   | Testing frontend and backend servers in isolation    |
 | **Local Docker (S3 Artifacts)**    | Cloud Integration Testing | Medium     | Docker, S3 Bucket        | Cloud integration testing                            |
-| **Cloud Deployment**               | Production                | High       | AWS Account, CDK, S3     | End-to-end cloud deployment recommended for prod env |
+| **Cloud Deployment (AgentCore)**   | Production                | High       | AWS Account, CDK, S3     | Serverless end-to-end cloud deployment for prod env  |
 
 ## Interactive Deployment Script
 
@@ -60,7 +60,7 @@ The `deploy.sh` script provides an interactive menu with comprehensive setup for
 1. **Local Testing (No Docker)** - Development mode with separate backend/frontend _(Recommended for new users)_
 2. **Local Testing (Docker - Local Artifacts)** - Containerized testing with local data
 3. **Local Testing (Docker - S3 Artifacts)** - Containerized testing with cloud data
-4. **Cloud Deployment** - Full AWS deployment wizard
+4. **Cloud Deployment (AgentCore Runtime - serverless)** - Full AWS deployment wizard
 5. **MCP Server Deployment** - Configure MCP server for Cline, Kiro, and Amazon Q
 6. **Exit**
 
@@ -163,8 +163,13 @@ For manual control over each step:
 
    ```bash
    cd backend/
-   uv run python websocket_server.py
+   # Allow unauthenticated local access (no Cognito) and enable CORS for the dev server
+   export ALLOW_ANONYMOUS=true
+   export CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+   uv run python agent_runtime.py
    ```
+
+   This starts the AgentCore Runtime entrypoint on port 8080 (`POST /invocations` + `GET /ping`).
 
 6. **Start Frontend Server** (in new terminal):
 
@@ -223,10 +228,10 @@ Test the full containerized environment with local codebase data.
 
 #### Docker Architecture
 
-- **WebSocket Backend**: FastAPI server on port 8000
+- **AgentCore Backend**: AgentCore Runtime entrypoint (`agent_runtime.py`) on port 8080 (`POST /invocations` + `GET /ping`)
 - **React Frontend**: React application on port 3000
-- **Session Management**: Hashmap-based session management
-- **Agent Streaming**: Real-time response streaming
+- **Session Management**: Per-session in-memory agent (the browser sends a session id header)
+- **Agent Streaming**: Real-time response streaming over Server-Sent Events
 
 ### Option 2: S3 Artifacts
 
@@ -280,11 +285,11 @@ The `start-docker.sh` script securely handles AWS credentials:
 
 ```bash
 # View logs
-docker-compose logs websocket-backend
+docker-compose logs agentcore-backend
 docker-compose logs react-frontend
 
 # Restart services
-docker-compose restart websocket-backend
+docker-compose restart agentcore-backend
 
 # Stop services
 docker-compose down
@@ -304,16 +309,15 @@ docker-compose down
 
 ### Deployment Architecture
 
-![Architecture Diagram](images/arch.jpg)
+![Architecture Diagram](images/architecture.png)
 
 **Components:**
 
-- **CloudFront**: CDN and HTTPS termination
-- **Application Load Balancer**: Backend routing
-- **ECS Fargate**: Containerized backend services
-- **Cognito**: User authentication
-- **S3**: Artifact storage
-- **Amazon VPC**: Network isolation
+- **Amazon Bedrock AgentCore Runtime**: Serverless backend hosting the IRIS agent (invoked directly by the browser over HTTPS)
+- **Amazon CloudFront**: CDN and HTTPS delivery for the static frontend (private S3 origin via OAC)
+- **Amazon S3**: Private frontend bucket, access-log buckets, and the external codebase artifacts bucket
+- **Amazon Cognito**: User authentication; its JWT authorizer gates the Runtime
+- **AWS CDK (Python)**: Infrastructure as Code
 
 ### Manual Cloud Deployment
 
@@ -404,10 +408,8 @@ codebase_artifacts:
   # - Access Logging: Enabled to audit bucket
   # - MFA Delete: Recommended for production
   kms_key_arn: "" # Optional: Customer managed AWS KMS key ARN for S3 encryption
-# Optional: Custom domain
-# domain:
-#   domain_name: "iris.yourcompany.com"
-#   certificate_arn: "arn:aws:acm:us-east-1:123456789012:certificate/..."
+# Optional: Amazon Bedrock Guardrail id (grants bedrock:ApplyGuardrail when set)
+# guardrail_id: ""
 ```
 
 #### 4. Customize Application
@@ -427,21 +429,50 @@ window.RUNTIME_CONFIG = {
 # Activate virtual environment
 source .venv/bin/activate
 
-# Deploy CDK stack
+# Deploy CDK stack (builds the ARM64 AgentCore container image and provisions
+# the Runtime, Cognito user pool, and the S3/CloudFront static frontend)
 cd infra/
 cdk deploy --context region=us-east-1
 ```
 
-#### 6. Create User Accounts
+> **Note:** The AgentCore Runtime requires an ARM64 image, which the CDK asset builds automatically via buildx. This build can take several minutes.
+
+#### 6. Build and Upload the Frontend
+
+The stack provisions the frontend bucket and Amazon CloudFront distribution but does not deploy the app itself, so the AgentRuntimeArn can be injected after the stack exists. Read the stack outputs, build the React app with `runtime-config.js` injected, and upload it to the frontend bucket:
+
+```bash
+# Read the values you need from the stack outputs (CloudFormation → Outputs):
+#   AgentRuntimeArn, FrontendBucketName, CognitoUserPoolId, CognitoUserPoolClientId
+
+cd frontend/
+npm ci
+npm run build
+
+# Inject Cognito + AgentRuntimeArn into the built app, then upload
+cp runtime-config-cloud.js dist/runtime-config.js
+AWS_REGION=us-east-1 \
+  USER_POOL_ID=<CognitoUserPoolId> \
+  USER_POOL_CLIENT_ID=<CognitoUserPoolClientId> \
+  AGENT_RUNTIME_ARN=<AgentRuntimeArn> \
+  CONFIG_FILE="./dist/runtime-config.js" \
+  ./inject-config.sh
+
+aws s3 sync dist/ s3://<FrontendBucketName>/ --delete --region us-east-1
+```
+
+> **Tip:** The `deploy.sh` wizard (option 4) automates this step, including a CloudFront cache invalidation so the new build is served immediately.
+
+#### 7. Create User Accounts
 
 After deployment, create user accounts in Cognito. See the [User Management Guide](user-management.md) for detailed instructions on creating users with either email-based or username-based sign-in.
 
-#### 7. Get Application URL
+#### 8. Get Application URL
 
 1. Go to CloudFormation console
 2. Find your deployed stack
 3. Click "Outputs" tab
-4. Copy the CloudFront URL
+4. Copy the `CloudFrontURL` value
 
 ### Automated Cloud Deployment
 
@@ -449,17 +480,18 @@ Use the interactive script for guided deployment:
 
 ```bash
 ./deploy.sh
-# Select option 4: "Cloud Deployment"
+# Select option 4: "Cloud Deployment (AgentCore Runtime - serverless)"
 ```
 
 The wizard will guide you through:
 
-1. S3 bucket configuration
-2. AWS region selection
-3. App name customization
-4. Artifact generation and upload
-5. CDK infrastructure deployment
-6. Post-deployment user creation instructions
+1. Directory configuration
+2. S3 bucket configuration (codebase artifacts)
+3. AWS region selection
+4. Artifact generation and upload to S3
+5. CDK infrastructure deployment (AgentCore Runtime + static frontend)
+6. Frontend build and upload (with the AgentRuntimeArn injected)
+7. Post-deployment user creation instructions
 
 ## Configuration
 
@@ -469,16 +501,15 @@ Edit `infra/config.yaml` to configure your deployment:
 
 ```yaml
 # CDK stack name
-app_name: IrisProduction
+app_name: "IrisProduction"
 
 # S3 configuration for codebase artifacts
 codebase_artifacts:
   bucket: "your-production-bucket"
   prefix: "production"
-# Optional: Custom domain (requires certificate)
-# domain:
-#   domain_name: "iris.yourcompany.com"
-#   certificate_arn: "arn:aws:acm:us-east-1:123456789012:certificate/..."
+  kms_key_arn: "" # Optional: Customer managed AWS KMS key ARN
+# Optional: Amazon Bedrock Guardrail id
+# guardrail_id: ""
 ```
 
 ### Application Customization
@@ -531,47 +562,32 @@ ignore_patterns:
 #### Infrastructure Configuration (`infra/config.yaml`)
 
 ```yaml
-# Stack configuration
-app_name: IrisProduction
+# CDK stack name
+app_name: "IrisProduction"
 
-# Authentication
-auth:
-  method: "cognito_auth"
-  allow_self_signup: false
-
-# S3 artifacts
+# S3 bucket configuration for codebase artifacts
+# (external/pre-existing bucket read by the Runtime in S3 mode;
+#  leave the bucket empty to bake the codebase into the image instead)
 codebase_artifacts:
   bucket: "your-production-bucket"
   prefix: "production"
+  # Optional: Customer managed AWS KMS key ARN for reading encrypted artifacts
+  kms_key_arn: ""
 
-# Optional: Custom domain
-domain:
-  domain_name: "iris.yourcompany.com"
-  certificate_arn: "arn:aws:acm:us-east-1:123456789012:certificate/..."
-
-# Optional: Amazon VPC configuration
-vpc:
-  cidr: "10.0.0.0/16"
-  enable_nat_gateway: true
-  enable_vpn_gateway: false
-
-# Optional: ECS configuration
-ecs:
-  cpu: 1024
-  memory: 2048
-  desired_count: 2
-  max_capacity: 10
-  min_capacity: 1
+# Optional: Amazon Bedrock Guardrail id (grants bedrock:ApplyGuardrail when set)
+# guardrail_id: ""
 ```
 
 #### Frontend Configuration
+
+The frontend is configured via `window.RUNTIME_CONFIG`, which supplies the AWS region, Amazon Cognito user pool id, Amazon Cognito app client id, and the AgentRuntimeArn. For local development, Vite environment variables provide the same values (including `VITE_LOCAL_AGENT_URL`, which points the browser at the local `agent_runtime.py` on port 8080).
 
 **Development** (`frontend/.env.development`):
 
 ```env
 VITE_APP_NAME="IRIS Dev"
-VITE_BACKEND_URL=http://localhost:8000
-VITE_WEBSOCKET_URL=ws://localhost:8000/ws
+VITE_LOCAL_AGENT_URL=http://localhost:8080
+VITE_AUTH_ENABLED=false
 ```
 
 **Docker** (`frontend/runtime-config-dev.js`):
@@ -579,8 +595,8 @@ VITE_WEBSOCKET_URL=ws://localhost:8000/ws
 ```javascript
 window.RUNTIME_CONFIG = {
   appName: "IRIS Docker",
-  backendUrl: "http://localhost:8000",
-  websocketUrl: "ws://localhost:8000/ws",
+  localAgentUrl: "http://localhost:8080",
+  authMethod: "none",
 };
 ```
 
@@ -589,7 +605,8 @@ window.RUNTIME_CONFIG = {
 ```javascript
 window.RUNTIME_CONFIG = {
   appName: "Your Company IRIS",
-  // URLs are automatically configured by CloudFormation
+  // awsRegion, userPoolId, userPoolClientId, and agentRuntimeArn are injected
+  // at deploy time by inject-config.sh from the CDK stack outputs.
 };
 ```
 
@@ -611,7 +628,7 @@ window.RUNTIME_CONFIG = {
 
 #### Production Environment
 
-- **High availability**: Multi-AZ deployment
+- **High availability**: Serverless AgentCore Runtime managed by AWS
 - **Security**: Full authentication and authorization
 - **Monitoring**: CloudWatch integration
 - **Backup**: Automated backups
@@ -639,15 +656,15 @@ For more information about AWS AI Services and data usage, see the [AWS Service 
 ### Infrastructure Security
 
 1. **Network Security**:
-   - **Amazon VPC Isolation**: All resources in private subnets
-   - **Security Groups**: Restrictive ingress/egress rules
-   - **ALB Protection**: Only accessible via CloudFront
+   - **Managed Runtime Boundary**: Serverless AgentCore Runtime in `PUBLIC` network mode — no customer VPC, subnets, NAT gateways, load balancers, or security groups to manage
+   - **Authorizer-Gated Access**: The Runtime's built-in Amazon Cognito JWT authorizer validates tokens before requests reach the container
+   - **Private Frontend Origin**: The S3 frontend bucket is private and reachable only through Amazon CloudFront via OAC
    - **HTTPS Enforcement**: All traffic encrypted in transit
 
 2. **Authentication & Authorization**:
-   - **Cognito Integration**: Centralized user management
-   - **MFA Support**: Optional multi-factor authentication
-   - **Session Management**: Secure session handling
+   - **Amazon Cognito Integration**: Centralized user management
+   - **JWT Authorization**: The frontend sends the Cognito access token as a Bearer token on every AgentCore invocation
+   - **Session Management**: Per-session microVM isolation
 
 3. **Data Security**:
    - **S3 Block Public Access**: All four settings enabled on all buckets
@@ -699,33 +716,19 @@ For more information about AWS AI Services and data usage, see the [AWS Service 
 
 #### CloudWatch Integration
 
-```yaml
-# Automatic metrics collection
-metrics:
-  - ResponseTime
-  - ErrorRate
-  - RequestCount
-  - ActiveSessions
-  - TokenUsage
-
-# Custom alarms
-alarms:
-  - HighErrorRate: >5
-  - SlowResponse: >30
-  - HighMemoryUsage: >80
-```
+The AgentCore Runtime emits its own service metrics and logs to CloudWatch. The IRIS
+stack does not define custom metrics, alarms, or dashboards — if you want alerting
+(for example on error rate or latency), create CloudWatch alarms against the Runtime's
+metrics or a metric filter on the log group below.
 
 #### Application Logs
 
 ```bash
-# View application logs
-aws logs tail /aws/ecs/iris --follow
+# View AgentCore Runtime logs (log group prefix: /aws/bedrock-agentcore/runtimes/)
+aws logs tail /aws/bedrock-agentcore/runtimes --follow
 
 # Search for errors
-aws logs filter-log-events --log-group-name /aws/ecs/iris --filter-pattern "ERROR"
-
-# Monitor WebSocket connections
-aws logs filter-log-events --log-group-name /aws/ecs/iris --filter-pattern "WebSocket"
+aws logs filter-log-events --log-group-name-prefix /aws/bedrock-agentcore/runtimes --filter-pattern "ERROR"
 ```
 
 ### Performance Monitoring
@@ -757,13 +760,12 @@ aws logs filter-log-events --log-group-name /aws/ecs/iris --filter-pattern "WebS
    - Use CDN for static assets
 
 2. **Scaling**:
-   - Load balancing across regions
-   - Database read replicas
+   - Serverless scaling handled by the AgentCore Runtime
+   - Distribute model calls across regions
 
 3. **Performance Tuning**:
    - Optimize model selection
    - Batch processing
-   - Connection pooling
 
 ### Maintenance Tasks
 
@@ -918,16 +920,12 @@ aws s3api get-bucket-location --bucket your-bucket
 **Diagnosis**:
 
 ```bash
-# Check CloudWatch metrics
-aws cloudwatch get-metric-statistics --namespace AWS/ECS --metric-name CPUUtilization --dimensions Name=ServiceName,Value=iris --start-time 2024-01-01T00:00:00Z --end-time 2024-01-01T23:59:59Z --period 3600 --statistics Average
-
-# Check application logs
-aws logs tail /aws/ecs/iris --follow
+# Check AgentCore Runtime logs
+aws logs tail /aws/bedrock-agentcore/runtimes --follow
 ```
 
 **Solutions**:
 
-- Scale up ECS tasks
 - Optimize model selection
 - Implement caching
 - Review query complexity
@@ -937,16 +935,12 @@ aws logs tail /aws/ecs/iris --follow
 **Diagnosis**:
 
 ```bash
-# Check memory usage
-aws cloudwatch get-metric-statistics --namespace AWS/ECS --metric-name MemoryUtilization
-
-# Check for memory leaks
-docker stats
+# Check AgentCore Runtime logs for errors
+aws logs filter-log-events --log-group-name-prefix /aws/bedrock-agentcore/runtimes --filter-pattern "ERROR"
 ```
 
 **Solutions**:
 
-- Increase ECS memory allocation
 - Implement conversation cleanup
 - Optimize file processing
 - Review agent memory usage
@@ -1015,15 +1009,13 @@ model_configuration:
 #### Updating Deployments
 
 ```bash
-# Update application code
+# Update application code (rebuilds the AgentCore container image and redeploys the Runtime)
 git pull origin main
+cd infra/
 cdk deploy --context region=us-east-1
 
-# Update configuration only
-cdk deploy --context region=us-east-1 --parameters ConfigVersion=v2
-
-# Rolling update (zero downtime)
-aws ecs update-service --cluster iris --service iris-service --force-new-deployment
+# After a redeploy, rebuild and re-upload the frontend (see "Build and Upload the Frontend"),
+# or simply re-run ./deploy.sh option 4 to handle both steps.
 ```
 
 #### Destroying Deployments
@@ -1044,8 +1036,8 @@ cdk destroy --context region=us-east-1
 
 **Important Notes**:
 
-- S3 bucket is NOT automatically deleted
-- Manual cleanup may be required for some resources
+- The stack-created S3 buckets (frontend and access-log buckets) are emptied and removed on stack deletion by the auto-delete custom resource
+- The external codebase artifacts bucket is NOT deleted by the stack — clean it up manually if needed
 - Verify all resources are deleted to avoid charges
 
 #### Manual Cleanup

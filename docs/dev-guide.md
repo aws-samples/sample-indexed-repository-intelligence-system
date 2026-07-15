@@ -36,7 +36,7 @@ Before starting development, ensure you have the following installed:
 
 - **AWS Account**: With appropriate permissions
 - **Amazon Bedrock Access**: Enabled in your target regions
-- **IAM Permissions**: For Amazon S3, Amazon ECS, AWS CloudFormation, Amazon Cognito, and Amazon Bedrock
+- **IAM Permissions**: For Amazon S3, Amazon Bedrock AgentCore, AWS CloudFormation, Amazon Cognito, and Amazon Bedrock
 
 ### Installing uv (recommended)
 
@@ -182,11 +182,11 @@ iris/
 │       ├── logging_setup.py        # Logging configuration
 │       └── utils.py                # General utilities
 │
-├── backend/                          # WebSocket backend
-│   ├── websocket_server.py         # Main WebSocket server
-│   ├── session_manager.py          # Session management
+├── backend/                          # AgentCore Runtime backend
+│   ├── agent_runtime.py            # AgentCore Runtime entrypoint (POST /invocations, GET /ping)
 │   ├── create_backend_agent.py     # Agent creation for backend
-│   ├── Dockerfile                  # Backend container
+│   ├── Dockerfile.agentcore        # ARM64 backend container (bake-in mode)
+│   ├── Dockerfile.agentcore_s3     # ARM64 backend container (S3 index-pull-at-boot mode)
 │   └── scripts/                    # Utility scripts
 │       ├── generate_summary.py     # Codebase summary generation
 │       ├── create_docker_config.py # Docker configuration
@@ -238,7 +238,7 @@ This is the fastest way to develop and test changes locally:
 
 #### Quick Start both backend and frontend
 
-Starts both the backend websocket server and React app with Vite.
+Starts both the backend AgentCore Runtime entrypoint and the React app with Vite.
 
 ```bash
 uv run iris ui
@@ -260,12 +260,15 @@ cd backend/
 uv run python scripts/generate_summary.py --local
 cd ..
 
-# Start backend server with hot reloading
+# Start the AgentCore Runtime entrypoint
 cd backend/
-uv run python websocket_server.py
+# Allow unauthenticated local access (no Cognito) and enable CORS for the dev server
+export ALLOW_ANONYMOUS=true
+export CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+uv run python agent_runtime.py
 ```
 
-The backend will be available at `http://localhost:8000` with WebSocket support at `ws://localhost:8000/ws`.
+The backend will be available at `http://localhost:8080` (`POST /invocations` for chat, `GET /ping` for health).
 
 #### Frontend Development
 
@@ -594,7 +597,7 @@ aws bedrock list-foundation-models --region us-west-2
 docker-compose build --no-cache
 
 # Check container logs
-docker-compose logs websocket-backend
+docker-compose logs agentcore-backend
 docker-compose logs react-frontend
 
 # Clean up Docker resources

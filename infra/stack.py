@@ -1,18 +1,11 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 import yaml
-import boto3
 from aws_cdk import (
     Stack,
-    Fn,
-    aws_ecs as ecs,
-    aws_ecs_patterns as ecs_patterns,
-    aws_ec2 as ec2,
-    aws_elasticloadbalancingv2 as elbv2,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
     aws_iam as iam,
-    aws_logs as logs,
     aws_lambda as _lambda,
     aws_cognito as cognito,
     aws_ecr_assets as assets,
@@ -21,6 +14,7 @@ from aws_cdk import (
     CfnOutput,
     RemovalPolicy,
 )
+import aws_cdk.aws_bedrock_agentcore_alpha as agentcore
 from constructs import Construct
 from cdk_nag import NagSuppressions
 
@@ -49,64 +43,27 @@ class IrisStack(Stack):
             # No server_access_logs_bucket to avoid infinite recursion
         )
 
-        # Create infrastructure components
-        vpc = self._create_vpc()
-        cluster = self._create_cluster(vpc)
-        task_role = self._create_task_role()
-
-        # Create Cognito authentication resources
+        # Cognito feeds the AgentCore Runtime JWT authorizer.
         user_pool, user_pool_client = self._create_cognito_user_pool()
 
-        # Create task definition with Cognito configuration
-        task_definition = self._create_task_definition(
-            task_role, user_pool, user_pool_client
+        self._build_agentcore_mode(user_pool, user_pool_client)
+
+    def _build_agentcore_mode(self, user_pool, user_pool_client):
+        """Serverless deployment: AgentCore Runtime backend + S3/CloudFront static frontend.
+
+        The browser invokes the Runtime data-plane endpoint directly (Cognito JWT
+        auth), and the static React app is served from S3 via CloudFront.
+        """
+        agentcore_runtime = self._create_agentcore_runtime(user_pool, user_pool_client)
+        distribution, site_bucket = self._create_static_frontend()
+
+        self._create_agentcore_outputs(
+            agentcore_runtime, distribution, site_bucket, user_pool, user_pool_client
         )
-        service = self._create_service(cluster, task_definition)
-
-        # Create CloudFront distribution with default SSL certificate
-        distribution = self._create_cloudfront(service)
-
-        # N1 fix: Wire CloudFront URL into backend CORS_ORIGINS so WebSocket
-        # Origin checks pass in cloud deployments.
-        cfn_task_def = task_definition.node.default_child
-        cfn_task_def.add_property_override(
-            "ContainerDefinitions.1.Environment.0.Value",
-            Fn.join(
-                ",",
-                [
-                    Fn.join("", ["https://", distribution.domain_name]),
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                ],
-            ),
-        )
-
-        self._create_outputs(distribution, service, user_pool, user_pool_client)
 
     def _suppress_nag(self, resource, suppressions):
         """Add CDK NAG suppressions to a resource"""
         NagSuppressions.add_resource_suppressions(resource, suppressions)
-
-    def _get_cloudfront_prefix_list(self):
-        """Get CloudFront managed prefix list ID for the current region"""
-        try:
-            ec2_client = boto3.client("ec2", region_name=self.region)
-            response = ec2_client.describe_managed_prefix_lists(
-                Filters=[
-                    {
-                        "Name": "prefix-list-name",
-                        "Values": ["com.amazonaws.global.cloudfront.origin-facing"],
-                    }
-                ]
-            )
-            if response["PrefixLists"]:
-                return response["PrefixLists"][0]["PrefixListId"]
-            else:
-                raise ValueError(
-                    f"CloudFront prefix list not found in region {self.region}"
-                )
-        except Exception as e:
-            raise ValueError(f"Failed to get CloudFront prefix list: {str(e)}")
 
     def _load_config(self):
         """Load configuration from config.yaml with defaults"""
@@ -115,110 +72,36 @@ class IrisStack(Stack):
                 return yaml.safe_load(f)
         except FileNotFoundError:
             # Default config if file not found
-            return {
-                "resources": {
-                    "total_memory_mib": 4096,
-                    "total_cpu": 2048,
-                    "frontend": {"memory_percentage": 40, "cpu_percentage": 40},
-                    "backend": {"memory_percentage": 60, "cpu_percentage": 60},
-                },
-                "service": {"desired_count": 1, "max_azs": 2},
-                "auth": {"method": "cognito_auth"},
-                "logging": {"retention_days": 7},
-            }
+            return {"auth": {"method": "cognito_auth"}}
 
-    def _create_vpc(self):
-        """Create Amazon VPC with 2 AZs for high availability and VPC endpoints"""
-        vpc = ec2.Vpc(
+    def _create_agentcore_execution_role(self):
+        """Create the IAM execution role for the AgentCore Runtime.
+
+        Trusts bedrock-agentcore.amazonaws.com and grants Bedrock invoke
+        (+ optional guardrail + optional S3) permissions. CloudWatch Logs /
+        X-Ray / ECR are added by the Runtime construct.
+        """
+        role = iam.Role(
             self,
-            "VPC",
-            max_azs=self.config["service"]["max_azs"],
-            nat_gateways=1,  # Required for Cognito JWKS endpoint (no VPC endpoint available)
-            flow_logs={
-                "default": ec2.FlowLogOptions(
-                    destination=ec2.FlowLogDestination.to_cloud_watch_logs()
-                )
-            },
+            "AgentCoreExecutionRole",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         )
 
-        # Add VPC Endpoints for AWS services (reduces NAT Gateway usage)
-
-        # S3 Gateway Endpoint (free) - for customer codebase artifacts
-        vpc.add_gateway_endpoint(
-            "S3Endpoint",
-            service=ec2.GatewayVpcEndpointAwsService.S3,
-        )
-
-        # Amazon Bedrock Runtime Interface Endpoint - for AI API calls
-        vpc.add_interface_endpoint(
-            "BedrockRuntimeEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
-            private_dns_enabled=True,
-        )
-
-        # CloudWatch Logs Interface Endpoint - for application logging
-        vpc.add_interface_endpoint(
-            "CloudWatchLogsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-            private_dns_enabled=True,
-        )
-
-        # ECR API Endpoint - for pulling container images
-        vpc.add_interface_endpoint(
-            "EcrApiEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR,
-            private_dns_enabled=True,
-        )
-
-        # ECR Docker Endpoint - for pulling container layers
-        vpc.add_interface_endpoint(
-            "EcrDockerEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-            private_dns_enabled=True,
-        )
-
-        # Note: Cognito does not have VPC endpoints
-        # Backend fetches JWKS from cognito-idp.<region>.amazonaws.com
-        # This requires NAT Gateway for internet access to Cognito's public endpoint
-        # VPC endpoints above reduce NAT Gateway data transfer costs for other services
-
-        return vpc
-
-    def _create_cluster(self, vpc):
-        """Create ECS cluster in the VPC"""
-        return ecs.Cluster(
-            self,
-            "Cluster",
-            vpc=vpc,
-            container_insights=True,
-        )
-
-    def _create_task_role(self):
-        """Create IAM role with Amazon Bedrock permissions for ECS tasks"""
-        task_role = iam.Role(
-            self, "TaskRole", assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
-        )
-        # Add Amazon Bedrock invoke permissions.
-        # System-defined cross-region inference profiles (us.*, eu.*, global.* prefixes)
-        # have no account ID in their ARN: arn:aws:bedrock:REGION::inference-profile/...
-        # Customer-created application inference profiles do include the account ID.
-        # Foundation models also have no account ID.
-        # We include both patterns to cover all model types (Claude, Nova, Titan, etc.)
-        # without reverting to Resource:*.
-        guardrail_id = self.config.get("guardrail_id", "")
         bedrock_invoke_resources = [
-            "arn:aws:bedrock:*::inference-profile/*",  # system-defined cross-region profiles
-            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",  # customer application profiles
-            "arn:aws:bedrock:*::foundation-model/*",  # foundation models
+            "arn:aws:bedrock:*::inference-profile/*",
+            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+            "arn:aws:bedrock:*::foundation-model/*",
         ]
-        bedrock_invoke_policy = iam.PolicyStatement(
-            actions=["bedrock:Invoke*", "bedrock:Converse*"],
-            resources=bedrock_invoke_resources,
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:Invoke*", "bedrock:Converse*"],
+                resources=bedrock_invoke_resources,
+            )
         )
-        task_role.add_to_policy(bedrock_invoke_policy)
 
+        guardrail_id = self.config.get("guardrail_id", "")
         if guardrail_id:
-            task_role.add_to_policy(
+            role.add_to_policy(
                 iam.PolicyStatement(
                     actions=["bedrock:ApplyGuardrail"],
                     resources=[
@@ -227,26 +110,27 @@ class IrisStack(Stack):
                 )
             )
 
-        # Add S3 permissions if S3 mode is enabled
+        # S3 read for codebase artifacts (S3 mode).
         s3_bucket = self.config.get("codebase_artifacts", {}).get("bucket", "")
         kms_key_arn = self.config.get("codebase_artifacts", {}).get("kms_key_arn", "")
-
         if s3_bucket:
-            s3_policy = iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:ListBucket"],
-                resources=[f"arn:aws:s3:::{s3_bucket}", f"arn:aws:s3:::{s3_bucket}/*"],
-            )
-            task_role.add_to_policy(s3_policy)
-
-            # Add KMS decrypt permission if customer provides CMK
-            if kms_key_arn:
-                kms_policy = iam.PolicyStatement(
-                    actions=["kms:Decrypt", "kms:DescribeKey"],
-                    resources=[kms_key_arn],
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["s3:GetObject", "s3:ListBucket"],
+                    resources=[
+                        f"arn:aws:s3:::{s3_bucket}",
+                        f"arn:aws:s3:::{s3_bucket}/*",
+                    ],
                 )
-                task_role.add_to_policy(kms_policy)
+            )
+            if kms_key_arn:
+                role.add_to_policy(
+                    iam.PolicyStatement(
+                        actions=["kms:Decrypt", "kms:DescribeKey"],
+                        resources=[kms_key_arn],
+                    )
+                )
 
-        # Suppress NAG warnings for wildcard actions and cross-region model ARNs
         nag_suppressions = [
             {
                 "id": "AwsSolutions-IAM5",
@@ -260,8 +144,6 @@ class IrisStack(Stack):
                 ],
             }
         ]
-
-        # Add S3 suppression if S3 mode is enabled
         if s3_bucket:
             nag_suppressions.append(
                 {
@@ -270,178 +152,110 @@ class IrisStack(Stack):
                     "appliesTo": [f"Resource::arn:aws:s3:::{s3_bucket}/*"],
                 }
             )
-
-        self._suppress_nag(task_role.node.find_child("DefaultPolicy"), nag_suppressions)
-
-        return task_role
-
-    def _create_task_definition(self, task_role, user_pool, user_pool_client):
-        """Create ECS task definition with sidecar pattern (frontend + backend)"""
-        total_memory = self.config["resources"]["total_memory_mib"]
-        total_cpu = self.config["resources"]["total_cpu"]
-
-        task_definition = ecs.FargateTaskDefinition(
-            self,
-            "TaskDef",
-            memory_limit_mib=total_memory,
-            cpu=total_cpu,
-            task_role=task_role,
-        )
-
-        # Calculate memory allocation
-        backend_memory = int(
-            total_memory
-            * self.config["resources"]["backend"]["memory_percentage"]
-            / 100
-        )
-        frontend_memory = int(
-            total_memory
-            * self.config["resources"]["frontend"]["memory_percentage"]
-            / 100
-        )
-
-        retention_days = getattr(
-            logs.RetentionDays,
-            f"_{self.config['logging']['retention_days']}_DAYS",
-            logs.RetentionDays.ONE_WEEK,
-        )
-
-        # Prepare frontend environment variables for Docker startup script
-        frontend_env = {
-            "DEPLOYMENT_MODE": "cloud",
-            "REACT_APP_BACKEND_URL": "/api",
-            "REACT_APP_WEBSOCKET_URL": "/ws",
-            "STACK_NAME": self.stack_name,
-            # Environment variables for injection script
-            "AWS_REGION": self.region,
-            "USER_POOL_ID": user_pool.user_pool_id,
-            "USER_POOL_CLIENT_ID": user_pool_client.user_pool_client_id,
-            # Also set REACT_APP versions for compatibility
-            "REACT_APP_AWS_REGION": self.region,
-            "REACT_APP_USER_POOL_ID": user_pool.user_pool_id,
-            "REACT_APP_USER_POOL_CLIENT_ID": user_pool_client.user_pool_client_id,
-        }
-
-        # Frontend container - React app on port 3000 (ALB target) - ADD FIRST
-        frontend_container = task_definition.add_container(
-            "frontend",
-            image=ecs.ContainerImage.from_asset(
-                "../frontend",
-                build_args={"BUILD_MODE": "cloud"},  # Use cloud mode for CDK deployment
-                platform=assets.Platform.LINUX_AMD64,  # Use buildx for multi-platform
-                exclude=[
-                    "**/.venv",
-                    "**/venv",
-                    "**/__pycache__",
-                    "**/cdk.out",
-                    "**/.git",
-                    "**/node_modules",
-                    "**/*.pyc",
-                    "**/.DS_Store",
+        # The AgentCore Runtime L2 construct adds a workload-identity permission to
+        # the execution role (for AgentCore Identity / GetWorkloadAccessToken). The
+        # directory/workload-identity name is generated at deploy time, so the
+        # construct scopes it with a wildcard on the identity name — this is
+        # construct-managed and required for the Runtime to obtain its workload token.
+        nag_suppressions.append(
+            {
+                "id": "AwsSolutions-IAM5",
+                "reason": "CloudWatch Logs, X-Ray, and AgentCore workload-identity permissions are added by the AgentCore Runtime L2 construct. Log group/stream and workload-identity names are generated at deploy time, and X-Ray PutTraceSegments/PutTelemetryRecords do not support resource-level scoping, so these wildcards are required and construct-managed.",
+                "appliesTo": [
+                    f"Resource::arn:aws:logs:{self.region}:<AWS::AccountId>:log-group:/aws/bedrock-agentcore/runtimes/*",
+                    f"Resource::arn:aws:logs:{self.region}:<AWS::AccountId>:log-group:*",
+                    f"Resource::arn:aws:logs:{self.region}:<AWS::AccountId>:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*",
+                    "Resource::*",
+                    f"Resource::arn:aws:bedrock-agentcore:{self.region}:<AWS::AccountId>:workload-identity-directory/default/workload-identity/*",
                 ],
-            ),
-            memory_reservation_mib=frontend_memory,
-            environment=frontend_env,
-            logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="frontend", log_retention=retention_days
-            ),
-            health_check=ecs.HealthCheck(
-                command=["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"],
-                interval=Duration.seconds(30),
-                timeout=Duration.seconds(10),
-                retries=3,
-                start_period=Duration.seconds(60),
-            ),
+            }
         )
-        frontend_container.add_port_mappings(
-            ecs.PortMapping(container_port=3000, protocol=ecs.Protocol.TCP)
-        )
+        self._suppress_nag(role.node.find_child("DefaultPolicy"), nag_suppressions)
 
-        # Determine if S3 mode is enabled
+        return role
+
+    def _create_agentcore_runtime(self, user_pool, user_pool_client):
+        """Create the AgentCore Runtime hosting the IRIS agent.
+
+        The browser invokes the Runtime data-plane endpoint directly; the Runtime's
+        Cognito JWT authorizer validates the user-pool tokens. Container is built
+        from backend/Dockerfile.agentcore as an ARM64 image (Runtime requires ARM64).
+        """
+        execution_role = self._create_agentcore_execution_role()
+
         s3_bucket = self.config.get("codebase_artifacts", {}).get("bucket", "")
         s3_prefix = self.config.get("codebase_artifacts", {}).get("prefix", "")
         use_s3_mode = bool(s3_bucket)
 
-        # Backend environment variables
-        backend_env = {
-            "CORS_ORIGINS": "http://localhost:3000,http://127.0.0.1:3000",
-            "PYTHONPATH": "/app/src",
+        # Environment for the agent process inside the microVM. No CORS_ORIGINS:
+        # the browser hits the AWS data-plane endpoint (which handles CORS), so the
+        # app never sees cross-origin requests. No app-level auth env: the Runtime
+        # authorizer validates JWTs before the request reaches the container.
+        environment = {
             "AWS_DEFAULT_REGION": self.region,
-            "USER_POOL_ID": user_pool.user_pool_id,
-            "USER_POOL_CLIENT_ID": user_pool_client.user_pool_client_id,
         }
-
-        # Add S3 configuration if enabled
         if use_s3_mode:
-            backend_env["S3_BUCKET"] = s3_bucket
+            environment["S3_BUCKET"] = s3_bucket
             if s3_prefix:
-                backend_env["S3_PREFIX"] = s3_prefix
+                environment["S3_PREFIX"] = s3_prefix
 
-        # Backend container - Python WebSocket server on port 8000
-        backend_container = task_definition.add_container(
-            "backend",
-            image=ecs.ContainerImage.from_asset(
-                "../",
-                file="backend/Dockerfile_s3" if use_s3_mode else "backend/Dockerfile",
-                platform=assets.Platform.LINUX_AMD64,  # Use buildx for multi-platform
-                exclude=[
-                    "**/.venv",
-                    "**/venv",
-                    "**/__pycache__",
-                    "**/cdk.out",
-                    "**/.git",
-                    "**/node_modules",
-                    "**/*.pyc",
-                    "**/.DS_Store",
-                ],
-            ),
-            memory_reservation_mib=backend_memory,
-            environment=backend_env,
-            logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="backend", log_retention=retention_days
-            ),
-            health_check=ecs.HealthCheck(
-                command=["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
-                interval=Duration.seconds(30),
-                timeout=Duration.seconds(10),
-                retries=3,
-                start_period=Duration.seconds(60),
-            ),
+        # Build the ARM64 container from the project root. In S3 mode the image
+        # downloads the codebase + representation from S3 at boot; otherwise it
+        # bakes them in at build time.
+        # The exclude list, critically, drops
+        # infra/cdk.out — without it the asset bundles its own output directory
+        # recursively and fills the disk (ENOSPC).
+        dockerfile = (
+            "backend/Dockerfile.agentcore_s3"
+            if use_s3_mode
+            else "backend/Dockerfile.agentcore"
         )
-        backend_container.add_port_mappings(
-            ecs.PortMapping(container_port=8000, protocol=ecs.Protocol.TCP)
-        )
-
-        # Suppress NAG warning for environment variables
-        self._suppress_nag(
-            task_definition,
-            [
-                {
-                    "id": "AwsSolutions-ECS2",
-                    "reason": "Environment variables contain non-sensitive configuration values like region and paths",
-                }
+        artifact = agentcore.AgentRuntimeArtifact.from_asset(
+            "../",
+            file=dockerfile,
+            platform=assets.Platform.LINUX_ARM64,
+            exclude=[
+                "**/.venv",
+                "**/venv",
+                "**/__pycache__",
+                "**/cdk.out",
+                "infra/cdk.out",
+                "**/.git",
+                "**/node_modules",
+                "**/*.pyc",
+                "**/.DS_Store",
             ],
         )
 
-        # Suppress NAG warning for ExecutionRole wildcard permissions
-        self._suppress_nag(
-            task_definition.execution_role.node.find_child("DefaultPolicy"),
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": "ECS ExecutionRole requires wildcard permissions for ECR image pulls and CloudWatch Logs",
-                    "appliesTo": ["Resource::*"],
-                }
-            ],
-        )
-
-        return task_definition
-
-    def _create_service(self, cluster, task_definition):
-        # Create S3 bucket for ALB access logs with server access logging
-        alb_logs_bucket = s3.Bucket(
+        runtime = agentcore.Runtime(
             self,
-            "ALBLogsBucket",
+            "IrisAgentRuntime",
+            runtime_name="iris_agent",
+            agent_runtime_artifact=artifact,
+            execution_role=execution_role,
+            environment_variables=environment,
+            protocol_configuration=agentcore.ProtocolType.HTTP,
+            network_configuration=agentcore.RuntimeNetworkConfiguration.using_public_network(),
+            authorizer_configuration=agentcore.RuntimeAuthorizerConfiguration.using_cognito(
+                user_pool,
+                [user_pool_client],
+            ),
+        )
+
+        return runtime
+
+    def _create_static_frontend(self):
+        """Host the built React app in a private S3 bucket behind CloudFront (OAC).
+
+        The frontend build + runtime-config.js injection + S3 upload is handled by
+        deploy.sh (which knows the AgentRuntimeArn from the stack output). This method
+        provisions the bucket, distribution, and SPA routing; it does not deploy
+        assets itself so the ARN can be injected after the stack exists.
+        """
+        # Private bucket for the static site (no public access; served via OAC).
+        site_bucket = s3.Bucket(
+            self,
+            "FrontendBucket",
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             enforce_ssl=True,
@@ -449,155 +263,12 @@ class IrisStack(Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             versioned=True,
             server_access_logs_bucket=self.server_access_logs_bucket,
-            server_access_logs_prefix="alb-logs-access/",
+            server_access_logs_prefix="frontend-s3-access/",
         )
 
-        # Create custom security group for ECS service with no default egress
-        # This prevents the problematic behavior where CDK clears egress rules on stack updates
-        ecs_security_group = ec2.SecurityGroup(
-            self,
-            "ServiceSecurityGroup",
-            vpc=cluster.vpc,
-            description="Security group for ECS service with least privilege egress",
-            allow_all_outbound=False,  # Critical: prevents default 0.0.0.0/0 egress rule
-        )
-
-        # Add specific egress rules to the custom security group
-        # Allow HTTPS (443) for VPC endpoints
-        ecs_security_group.add_egress_rule(
-            peer=ec2.Peer.ipv4(cluster.vpc.vpc_cidr_block),
-            connection=ec2.Port.tcp(443),
-            description="Allow HTTPS to VPC endpoints",
-        )
-
-        # Allow HTTPS (443) to internet for Cognito JWKS endpoint
-        # Cognito does not have VPC endpoints, so we need internet access for JWT validation
-        ecs_security_group.add_egress_rule(
-            peer=ec2.Peer.any_ipv4(),
-            connection=ec2.Port.tcp(443),
-            description="Allow HTTPS to Cognito for JWT validation (no VPC endpoint available)",
-        )
-
-        # Allow DNS (53) for name resolution
-        ecs_security_group.add_egress_rule(
-            peer=ec2.Peer.ipv4(cluster.vpc.vpc_cidr_block),
-            connection=ec2.Port.udp(53),
-            description="Allow DNS queries",
-        )
-
-        # Suppress NAG warning for ECS security group egress
-        self._suppress_nag(
-            ecs_security_group,
-            [
-                {
-                    "id": "AwsSolutions-EC23",
-                    "reason": "ECS tasks require HTTPS egress for Cognito JWT validation (no VPC endpoint available). All other traffic restricted to VPC endpoints.",
-                }
-            ],
-        )
-
-        service = ecs_patterns.ApplicationLoadBalancedFargateService(
-            self,
-            "Service",
-            cluster=cluster,
-            task_definition=task_definition,
-            public_load_balancer=True,
-            assign_public_ip=False,
-            listener_port=80,
-            desired_count=self.config["service"]["desired_count"],
-            security_groups=[ecs_security_group],  # Use our custom security group
-        )
-
-        # Enable ALB access logging
-        service.load_balancer.log_access_logs(
-            bucket=alb_logs_bucket, prefix="alb-access-logs"
-        )
-
-        # Configure health check to target React frontend
-        service.target_group.configure_health_check(
-            path="/",
-            port="3000",
-            healthy_threshold_count=2,
-            unhealthy_threshold_count=3,
-            timeout=Duration.seconds(10),
-            interval=Duration.seconds(30),
-        )
-
-        # SECURITY: Replace default internet access with CloudFront-only access
-        # First remove the default 0.0.0.0/0 rule
-        default_sg = service.load_balancer.connections.security_groups[0]
-
-        # Get CloudFront prefix list for current region
-        cloudfront_prefix_list = self._get_cloudfront_prefix_list()
-
-        # Add CloudFront-only access rule
-        default_sg.add_ingress_rule(
-            peer=ec2.Peer.prefix_list(cloudfront_prefix_list),
-            connection=ec2.Port.tcp(80),
-            description="Allow CloudFront access only",
-        )
-
-        # Remove the default 0.0.0.0/0 rule by overriding it
-        cfn_sg = default_sg.node.default_child
-        cfn_sg.add_property_override(
-            "SecurityGroupIngress",
-            [
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 80,
-                    "ToPort": 80,
-                    "SourcePrefixListId": cloudfront_prefix_list,
-                    "Description": "Allow CloudFront access only",
-                }
-            ],
-        )
-
-        # Suppress NAG warning for ALB security group allowing 0.0.0.0/0
-        self._suppress_nag(
-            service.load_balancer.node.find_child("SecurityGroup"),
-            [
-                {
-                    "id": "AwsSolutions-EC23",
-                    "reason": "ALB needs to accept traffic from CloudFront edge locations globally, restricted by CloudFront prefix list",
-                }
-            ],
-        )
-
-        # Create target group for backend container
-        backend_target_group = elbv2.ApplicationTargetGroup(
-            self,
-            "BackendTargetGroup",
-            port=8000,
-            protocol=elbv2.ApplicationProtocol.HTTP,
-            vpc=service.cluster.vpc,
-            target_type=elbv2.TargetType.IP,
-            health_check=elbv2.HealthCheck(path="/health", port="8000"),
-        )
-
-        # Register ECS service to backend target group
-        backend_target_group.add_target(
-            service.service.load_balancer_target(
-                container_name="backend", container_port=8000
-            )
-        )
-
-        # Route /ws and /api/* to backend container
-        service.listener.add_action(
-            "BackendAction",
-            priority=100,
-            conditions=[elbv2.ListenerCondition.path_patterns(["/ws*", "/api/*"])],
-            action=elbv2.ListenerAction.forward([backend_target_group]),
-        )
-
-        return service
-
-    def _create_cloudfront(self, service):
-        """Create CloudFront distribution with default SSL certificate"""
-
-        # Create S3 bucket for CloudFront access logs with server access logging
         cloudfront_logs_bucket = s3.Bucket(
             self,
-            "CloudFrontLogsBucket",
+            "FrontendCloudFrontLogsBucket",
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             enforce_ssl=True,
@@ -606,82 +277,93 @@ class IrisStack(Stack):
             versioned=True,
             object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
             server_access_logs_bucket=self.server_access_logs_bucket,
-            server_access_logs_prefix="cloudfront-logs-access/",
+            server_access_logs_prefix="frontend-cloudfront-access/",
         )
 
-        # Configure origin with custom headers for ALB security
-        origin = origins.LoadBalancerV2Origin(
-            service.load_balancer,
-            protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
-            http_port=80,
-            read_timeout=Duration.seconds(60),
-            keepalive_timeout=Duration.seconds(5),
-            origin_ssl_protocols=[cloudfront.OriginSslPolicy.TLS_V1_2],
-            custom_headers={
-                "X-Forwarded-Proto": "https",
-                "X-CloudFront-Origin": "true",  # Custom header to verify CloudFront origin
-            },
-        )
+        # S3 origin with Origin Access Control (OAC) — bucket stays private.
+        s3_origin = origins.S3BucketOrigin.with_origin_access_control(site_bucket)
 
-        behavior_options = {
-            "origin": origin,
-            "allowed_methods": cloudfront.AllowedMethods.ALLOW_ALL,
-            "viewer_protocol_policy": cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,  # Force HTTPS
-            "cache_policy": cloudfront.CachePolicy.CACHING_DISABLED,
-            "origin_request_policy": cloudfront.OriginRequestPolicy.ALL_VIEWER,
-            "response_headers_policy": cloudfront.ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS,
-            "compress": False,
-        }
-
-        # CloudFront distribution with default SSL certificate (automatic)
         distribution = cloudfront.Distribution(
             self,
-            "Distribution",
-            default_behavior=cloudfront.BehaviorOptions(**behavior_options),
-            additional_behaviors={
-                "/api/*": cloudfront.BehaviorOptions(
-                    origin=origin,
-                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
-                    response_headers_policy=cloudfront.ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS,
-                    compress=False,
+            "FrontendDistribution",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=s3_origin,
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                compress=True,
+            ),
+            default_root_object="index.html",
+            # SPA routing: serve index.html for client-side routes (403/404 -> app).
+            error_responses=[
+                cloudfront.ErrorResponse(
+                    http_status=403,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(0),
                 ),
-                "/ws": cloudfront.BehaviorOptions(
-                    origin=origin,
-                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
-                    response_headers_policy=cloudfront.ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS,
-                    compress=False,
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=Duration.seconds(0),
                 ),
-            },
+            ],
             enable_ipv6=False,
             enable_logging=True,
             log_bucket=cloudfront_logs_bucket,
-            log_file_prefix="cloudfront-access-logs/",
+            log_file_prefix="frontend-cloudfront-access-logs/",
             minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
-            comment="IRIS - CloudFront with default SSL",
+            comment="IRIS - static frontend (AgentCore mode)",
         )
 
-        # Suppress NAG warning for default CloudFront certificate TLS limitation
         self._suppress_nag(
             distribution,
             [
                 {
                     "id": "AwsSolutions-CFR4",
-                    "reason": "Default CloudFront certificate automatically uses TLSv1 minimum - custom certificate requires domain ownership",
+                    "reason": "Default CloudFront certificate uses TLSv1 minimum - custom certificate requires domain ownership",
                 },
                 {
-                    "id": "AwsSolutions-CFR5",
-                    "reason": "CloudFront to ALB communication uses HTTP over AWS internal network. HTTPS between CloudFront and ALB would require SSL certificate on ALB which needs domain ownership. End-user traffic is encrypted via HTTPS redirection to CloudFront.",
+                    "id": "AwsSolutions-CFR1",
+                    "reason": "Geo restriction is not required for this internal tool",
+                },
+                {
+                    "id": "AwsSolutions-CFR2",
+                    "reason": "WAF is out of scope for this proof-of-value; access is gated by Cognito auth at the Runtime layer",
                 },
             ],
         )
 
-        return distribution
+        return distribution, site_bucket
+
+    def _create_agentcore_outputs(
+        self, agentcore_runtime, distribution, site_bucket, user_pool, user_pool_client
+    ):
+        """Stack outputs for AgentCore mode (consumed by deploy.sh for frontend config)."""
+        CfnOutput(self, "CloudFrontURL", value=f"https://{distribution.domain_name}")
+        CfnOutput(
+            self,
+            "AgentRuntimeArn",
+            value=agentcore_runtime.agent_runtime_arn,
+            description="ARN of the IRIS AgentCore Runtime (the frontend invokes this directly).",
+        )
+        CfnOutput(
+            self,
+            "FrontendBucketName",
+            value=site_bucket.bucket_name,
+            description="S3 bucket to sync the built React app into.",
+        )
+        CfnOutput(self, "AuthMethod", value="cognito_auth")
+        CfnOutput(self, "CognitoUserPoolId", value=user_pool.user_pool_id)
+        CfnOutput(
+            self, "CognitoUserPoolClientId", value=user_pool_client.user_pool_client_id
+        )
+        CfnOutput(
+            self,
+            "CognitoUserPoolUrl",
+            value=f"https://{self.region}.console.aws.amazon.com/cognito/v2/idp/user-pools/{user_pool.user_pool_id}/user-management/users?region={self.region}",
+        )
 
     def _create_cognito_user_pool(self):
         """Create Cognito User Pool and User Pool Client for authentication"""
@@ -766,22 +448,3 @@ class IrisStack(Stack):
         )
 
         return user_pool, user_pool_client
-
-    def _create_outputs(self, distribution, service, user_pool, user_pool_client):
-        """Create CloudFormation outputs for URLs and Cognito credentials"""
-        CfnOutput(self, "CloudFrontURL", value=f"https://{distribution.domain_name}")
-        CfnOutput(
-            self,
-            "LoadBalancerURL",
-            value=f"http://{service.load_balancer.load_balancer_dns_name}",
-        )
-        CfnOutput(self, "AuthMethod", value="cognito_auth")
-        CfnOutput(self, "CognitoUserPoolId", value=user_pool.user_pool_id)
-        CfnOutput(
-            self, "CognitoUserPoolClientId", value=user_pool_client.user_pool_client_id
-        )
-        CfnOutput(
-            self,
-            "CognitoUserPoolUrl",
-            value=f"https://{self.region}.console.aws.amazon.com/cognito/v2/idp/user-pools/{user_pool.user_pool_id}/user-management/users?region={self.region}",
-        )

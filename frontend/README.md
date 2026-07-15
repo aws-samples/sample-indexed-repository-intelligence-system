@@ -97,7 +97,7 @@ Edit `runtime-config-cloud.js`:
 ```javascript
 window.RUNTIME_CONFIG = {
   appName: "IRIS",
-  backendUrl: "/api", // Uses same domain via ALB
+  backendUrl: "/api", // Same-origin path; app calls the AgentCore Runtime endpoint directly
 };
 ```
 
@@ -257,7 +257,6 @@ When contributing to the React frontend:
 This React frontend focuses on providing a web-based chat interface, while the CLI version (`iris` commands) provides:
 
 - Interactive terminal-based chat
-- File editing capabilities
 - Streamlit UI option
 - Direct codebase analysis commands
 

@@ -1,433 +1,299 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
-// Force rebuild v2
+//
+// IRIS service — Amazon Bedrock AgentCore Runtime transport.
+//
+// Replaces the previous WebSocket transport. The browser invokes the AgentCore
+// Runtime directly over HTTPS and reads a Server-Sent Events (SSE) stream:
+//
+//   POST {endpoint}/runtimes/{arn}/invocations?qualifier=DEFAULT
+//   Authorization: Bearer <Cognito JWT>
+//   X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: <session id>
+//
+// The backend (backend/agent_runtime.py) already reshapes Strands events into
+// IRIS's event envelope (status / stream_chunk / tool_use / complete / error),
+// so this client keeps the same handleWebSocketMessage logic and the same public
+// API (connect / disconnect / reconnect / subscribe / sendMessage / loadConfig /
+// getCodebaseInfo / generateContext). App.jsx and Chat.jsx are unchanged.
+
 import { getAppConfig } from "../config/appConfig.js";
 import { fetchAuthSession } from "aws-amplify/auth";
 
 class IrisService {
   constructor() {
-    // Don't set URLs in constructor - get them dynamically when needed
     this.subscribers = new Set();
     this.messageId = 1;
-    this.websocket = null;
     this.isConnected = false;
-    this.clientId = null;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
-    this.currentResponse = ""; // Track accumulated response
-    this.announcedTools = new Set(); // Track announced tools
+    this.currentResponse = ""; // accumulated assistant text for the in-flight reply
+    this.announcedTools = new Set();
+    this.sessionId = null; // AgentCore runtimeSessionId (stable across turns)
+    this._inFlight = null; // AbortController for the current invocation
   }
 
-  get baseUrl() {
-    return getAppConfig().backendUrl;
+  // ---- config accessors -----------------------------------------------------
+
+  get _cfg() {
+    return getAppConfig();
   }
 
-  get wsUrl() {
-    return getAppConfig().websocketUrl;
-  }
-
-  // Configuration methods
-  async loadConfig() {
-    try {
-      const response = await fetch(`${this.baseUrl}/config`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      return await response.json();
-    } catch (error) {
-      console.error("Error loading config:", error);
-      // Return default config from environment variables or fallback
-      return {
-        codebase_dir:
-          import.meta.env.VITE_CODEBASE_DIR ||
-          import.meta.env.REACT_APP_CODEBASE_DIR ||
-          "./codebase",
-        output_dir:
-          import.meta.env.VITE_OUTPUT_DIR ||
-          import.meta.env.REACT_APP_OUTPUT_DIR ||
-          ".iris_cache",
-      };
+  /** Direct AgentCore Runtime invocation URL, or a local dev endpoint. */
+  _invocationUrl() {
+    const cfg = this._cfg;
+    // Local dev: talk straight to `python agent_runtime.py` on :8080.
+    if (cfg.localAgentUrl) {
+      return `${cfg.localAgentUrl.replace(/\/$/, "")}/invocations`;
     }
-  }
-
-  async validateTree(codebaseDir) {
-    try {
-      const response = await fetch(`${this.baseUrl}/validate-tree`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          codebase_dir: codebaseDir,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error("Error validating tree:", error);
-      // Return mock data for development
-      return this.getMockTreeValidation();
+    const region = cfg.cognito?.region || "us-east-1";
+    const arn = cfg.agentRuntimeArn;
+    if (!arn) {
+      throw new Error("Agent Runtime ARN not configured");
     }
+    const endpoint = `https://bedrock-agentcore.${region}.amazonaws.com`;
+    return `${endpoint}/runtimes/${encodeURIComponent(arn)}/invocations?qualifier=DEFAULT`;
   }
 
-  async getCodebaseInfo() {
+  /**
+   * AgentCore requires a runtimeSessionId of at least 33 characters. Generate one
+   * per chat and reuse it across turns so the Runtime keeps the same microVM (and
+   * therefore the same in-memory conversation history).
+   */
+  _ensureSessionId() {
+    if (!this.sessionId) {
+      const raw =
+        (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(
+          /-/g,
+          "",
+        );
+      // pad to >= 33 chars
+      this.sessionId = `iris-${raw}${"0".repeat(33)}`.slice(0, 40);
+    }
+    return this.sessionId;
+  }
+
+  async _getAuthToken() {
+    // Local/anonymous dev has no auth; return null and proceed.
+    if (this._cfg.authEnabled === false) return null;
     try {
-      const response = await fetch(`${this.baseUrl}/codebase-info`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      return await response.json();
-    } catch (error) {
-      console.error("Error getting codebase info:", error);
-      // Return null when no data is available
+      const session = await fetchAuthSession();
+      // Send the ACCESS token, not the ID token. The Runtime's Cognito JWT
+      // authorizer is configured with `allowedClients`, which validates the
+      // `client_id` claim. Cognito access tokens carry `client_id`; ID tokens
+      // carry `aud` instead and would be rejected with a 403.
+      return session.tokens?.accessToken?.toString() || null;
+    } catch (e) {
+      console.log("No auth token available");
       return null;
     }
   }
 
-  async generateContext(codebaseDir, outputDir) {
-    try {
-      const response = await fetch(`${this.baseUrl}/generate-context`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          codebase_dir: codebaseDir,
-          output_dir: outputDir,
-        }),
-      });
+  // ---- connection lifecycle (no persistent socket now) ----------------------
+  // Kept for API compatibility with App.jsx / Chat.jsx. There is no long-lived
+  // connection to AgentCore; "connecting" just means the service is ready.
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error("Error generating context:", error);
-      // Return mock success for development
-      return {
-        status: "update_complete",
-        message: "Context generated successfully (mock)",
-        processed_files: ["src/App.js", "src/components/Chat.js"],
-      };
-    }
-  }
-
-  async queryCodebase(userInput, codebaseDir, outputDir) {
-    try {
-      const response = await fetch(`${this.baseUrl}/query`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_input: userInput,
-          codebase_dir: codebaseDir,
-          output_dir: outputDir,
-          streaming: true,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      // Handle streaming response
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      return {
-        async *[Symbol.asyncIterator]() {
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-
-              const chunk = decoder.decode(value);
-              const lines = chunk.split("\n");
-
-              for (const line of lines) {
-                if (line.trim() && line.startsWith("data: ")) {
-                  const data = line.slice(6);
-                  if (data !== "[DONE]") {
-                    yield data;
-                  }
-                }
-              }
-            }
-          } finally {
-            reader.releaseLock();
-          }
-        },
-      };
-    } catch (error) {
-      console.error("Error querying codebase:", error);
-      // Return mock response for development
-      return this.getMockResponse(userInput);
-    }
-  }
-
-  async loadConversationHistory(outputDir) {
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/conversation-history?output_dir=${encodeURIComponent(outputDir)}`,
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      return await response.json();
-    } catch (error) {
-      console.error("Error loading conversation history:", error);
-      return [];
-    }
-  }
-
-  async saveConversationHistory(conversationHistory, outputDir) {
-    try {
-      const response = await fetch(`${this.baseUrl}/conversation-history`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          conversation_history: conversationHistory,
-          output_dir: outputDir,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error("Error saving conversation history:", error);
-      return { success: false, error: error.message };
-    }
-  }
-
-  async clearConversationHistory(outputDir) {
-    try {
-      const response = await fetch(`${this.baseUrl}/conversation-history`, {
-        method: "DELETE",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          output_dir: outputDir,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error("Error clearing conversation history:", error);
-      return { success: false, error: error.message };
-    }
-  }
-
-  // Mock methods for development when backend is not available
-  getMockTreeValidation() {
-    return {
-      has_changed: true,
-      change_details: {
-        new_files: [
-          "mock/components/Configuration.js",
-          "mock/components/TreeValidation.js",
-        ],
-        modified_files: ["mock/App.js"],
-        deleted_files: [],
-      },
-      tree_display: `MOCK!! react-app/
-├── src/
-│   ├── App.js
-│   ├── index.js
-│   ├── components/
-│   │   ├── Chat.js
-│   │   ├── Configuration.js
-│   │   └── TreeValidation.js
-│   └── services/
-│       ├── mockWebSocket.js
-│       └── irisService.js
-├── package.json
-└── README.md`,
-      total_files: 8,
-      files_to_process: [
-        "mock/components/Configuration.js",
-        "mock/components/TreeValidation.js",
-        "mock/App.js",
-      ],
-    };
-  }
-
-  async *getMockResponse(userInput) {
-    const responses = [
-      `I understand you're asking about "${userInput}". Let me analyze the codebase for you.`,
-      `\n\nBased on my analysis of the React application, I can see that:`,
-      `\n- It's a modern chat interface built with React and Tailwind CSS`,
-      `\n- The current implementation uses a mock WebSocket service`,
-      `\n- There are components for Chat, Configuration, and TreeValidation`,
-      `\n\nThe codebase appears to be well-structured with separate concerns for UI components and services.`,
-      `\n\nIs there anything specific about the code you'd like me to explain further?`,
-    ];
-
-    for (const chunk of responses) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      yield chunk;
-    }
-  }
-
-  // WebSocket connection management
   async connect() {
-    return new Promise(async (resolve, reject) => {
-      try {
-        this.websocket = new WebSocket(this.wsUrl);
-
-        // Get token for authentication message
-        let authToken = null;
-        try {
-          const session = await fetchAuthSession();
-          authToken = session.tokens?.idToken?.toString();
-        } catch (authError) {
-          console.log(
-            "No auth token available, connecting without authentication",
-          );
-        }
-
-        this.websocket.onopen = () => {
-          console.log("Connected to WebSocket server");
-
-          // Send authentication as first message if token exists (secure approach)
-          if (authToken) {
-            const authMessage = {
-              type: "authenticate",
-              token: authToken,
-            };
-            this.websocket.send(JSON.stringify(authMessage));
-            console.log("Sent authentication message to WebSocket server");
-          }
-
-          this.isConnected = true;
-          this.reconnectAttempts = 0;
-          resolve();
-        };
-
-        this.websocket.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
-            this.handleWebSocketMessage(message);
-          } catch (error) {
-            console.error("Error parsing WebSocket message:", error);
-          }
-        };
-
-        this.websocket.onclose = () => {
-          console.log("WebSocket connection closed");
-          this.isConnected = false;
-          this.attemptReconnect();
-        };
-
-        this.websocket.onerror = (error) => {
-          console.error("WebSocket error:", error);
-          this.isConnected = false;
-          reject(error);
-        };
-      } catch (error) {
-        console.error("Error creating WebSocket connection:", error);
-        reject(error);
-      }
-    });
+    this._ensureSessionId();
+    this.isConnected = true;
+    return Promise.resolve();
   }
 
   disconnect() {
-    if (this.websocket) {
-      this.websocket.close();
-      this.websocket = null;
+    if (this._inFlight) {
+      this._inFlight.abort();
+      this._inFlight = null;
     }
     this.isConnected = false;
     this.subscribers.clear();
   }
 
-  /**
-   * Manual reconnect - resets attempt counter and tries to connect
-   * Use this when user explicitly wants to reconnect after timeout
-   * Preserves existing subscribers and notifies them of reconnection
-   */
   async reconnect() {
-    // Disconnect any existing connection first (but preserve subscribers)
-    if (this.websocket) {
-      this.websocket.close();
-      this.websocket = null;
-    }
-    this.isConnected = false;
-    this.reconnectAttempts = 0; // Reset counter for manual reconnect
-
-    await this.connect();
-
-    // Notify subscribers of successful reconnection
+    // Start a fresh conversation session on explicit reconnect.
+    this.sessionId = null;
+    this._ensureSessionId();
+    this.isConnected = true;
     this.emit({
       type: "connection_success",
       message: "Reconnected successfully",
     });
   }
 
-  attemptReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      console.log(
-        `Attempting to reconnect... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
-      );
+  // ---- messaging ------------------------------------------------------------
 
-      setTimeout(() => {
-        this.connect().catch((error) => {
-          console.error("Reconnection failed:", error);
-        });
-      }, 2000 * this.reconnectAttempts); // Exponential backoff
+  async sendMessage(content) {
+    const messageId = this.messageId++;
+    // Reset per-reply accumulators.
+    this.currentResponse = "";
+    this.announcedTools.clear();
+
+    const url = this._invocationUrl();
+    const sessionId = this._ensureSessionId();
+    const token = await this._getAuthToken();
+
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": sessionId,
+    };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    this._inFlight = new AbortController();
+
+    // Signal "typing" so the UI shows the indicator (parity with old status event).
+    this.emit({
+      id: messageId,
+      type: "typing",
+      sender: "agent",
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ prompt: content, runtimeSessionId: sessionId }),
+        signal: this._inFlight.signal,
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status}: ${detail}`);
+      }
+
+      await this._readSSE(response);
+    } catch (error) {
+      if (error.name === "AbortError") return { id: messageId };
+      console.error("Error invoking agent:", error);
+      this.emit({
+        id: this.messageId++,
+        content: "Error: failed to reach IRIS service",
+        timestamp: new Date().toISOString(),
+        sender: "agent",
+        type: "message",
+      });
+    } finally {
+      this._inFlight = null;
+    }
+
+    return { id: messageId };
+  }
+
+  /** Read the SSE stream and route each `data:` frame through handleWebSocketMessage. */
+  async _readSSE(response) {
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          this._handleSSELine(line);
+        }
+      }
+      if (buffer.trim()) this._handleSSELine(buffer);
+    } finally {
+      reader.releaseLock();
     }
   }
 
+  _handleSSELine(line) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data: ")) return;
+    const data = trimmed.slice(6);
+    if (!data) return;
+    try {
+      const message = JSON.parse(data);
+      // The AgentCore harness also emits a top-level {error, error_type} frame if
+      // the server generator throws — normalize it to our envelope.
+      if (message.error && !message.type) {
+        this.handleWebSocketMessage({ type: "error", data: { error: message.error } });
+        return;
+      }
+      this.handleWebSocketMessage(message);
+    } catch (e) {
+      console.debug("Failed to parse SSE frame:", data);
+    }
+  }
+
+  // ---- config / read-only actions (via invocation payload) ------------------
+
+  async _invokeAction(action) {
+    const url = this._invocationUrl();
+    const sessionId = this._ensureSessionId();
+    const token = await this._getAuthToken();
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": sessionId,
+    };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    // Actions return a single SSE frame; collect the first data payload.
+    const text = await response.text();
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (t.startsWith("data: ")) {
+        try {
+          return JSON.parse(t.slice(6)).data;
+        } catch (e) {
+          /* fall through */
+        }
+      }
+    }
+    return null;
+  }
+
+  async loadConfig() {
+    try {
+      const data = await this._invokeAction("config");
+      return data || { codebase_dir: "./codebase", output_dir: ".iris_cache" };
+    } catch (error) {
+      console.error("Error loading config:", error);
+      return { codebase_dir: "./codebase", output_dir: ".iris_cache" };
+    }
+  }
+
+  async getCodebaseInfo() {
+    try {
+      return await this._invokeAction("codebase_info");
+    } catch (error) {
+      console.error("Error getting codebase info:", error);
+      return null;
+    }
+  }
+
+  async generateContext() {
+    try {
+      return await this._invokeAction("generate_context");
+    } catch (error) {
+      console.error("Error generating context:", error);
+      return { status: "error", error: error.message };
+    }
+  }
+
+  // ---- event handling (unchanged envelope from the old WebSocket server) -----
+
   handleWebSocketMessage(message) {
     switch (message.type) {
-      case "welcome":
-        this.clientId = message.data.client_id;
-        console.log("Received welcome message, client ID:", this.clientId);
-        break;
-
       case "auth_success":
-        console.log("WebSocket authentication successful");
         this.emit({
           type: "connection_success",
           message: "Connected and authenticated successfully",
         });
         break;
 
-      case "auth_error":
-        console.error(
-          "WebSocket authentication failed:",
-          message.message || message.data?.error,
-        );
-        this.emit({
-          type: "error",
-          error:
-            "Authentication failed: " +
-            (message.message || message.data?.error || "Invalid token"),
-        });
-        break;
-
       case "stream_chunk":
-        // Accumulate streaming text chunks
-        if (!this.currentResponse) {
-          this.currentResponse = "";
-        }
         this.currentResponse += message.data.content;
-
         this.emit({
           id: message.message_id,
           content: message.data.content,
@@ -438,8 +304,7 @@ class IrisService {
         });
         break;
 
-      case "tool_use":
-        // Add tool notification to accumulated text (only once per tool)
+      case "tool_use": {
         const toolId = message.data.tool_id;
         if (toolId && !this.announcedTools.has(toolId)) {
           const toolEmojis = {
@@ -453,17 +318,10 @@ class IrisService {
           const emoji = toolEmojis[message.data.tool_name] || "🔧";
           const transformedToolName = message.data.tool_name
             .replace(/_/g, " ")
-            .replace(/(^|\s)\w/g, function (match) {
-              return match.toUpperCase();
-            });
+            .replace(/(^|\s)\w/g, (m) => m.toUpperCase());
           const toolText = `\n\n> ${emoji} **Using tool: ${transformedToolName}**\n\n`;
-
-          if (!this.currentResponse) {
-            this.currentResponse = "";
-          }
           this.currentResponse += toolText;
           this.announcedTools.add(toolId);
-
           this.emit({
             id: message.message_id,
             content: toolText,
@@ -474,9 +332,9 @@ class IrisService {
           });
         }
         break;
+      }
 
       case "complete":
-        // Handle completion
         this.emit({
           id: message.message_id,
           content: this.currentResponse || "",
@@ -484,12 +342,11 @@ class IrisService {
           sender: "agent",
           type: "message",
         });
-        this.currentResponse = ""; // Reset for next message
-        this.announcedTools.clear(); // Reset announced tools
+        this.currentResponse = "";
+        this.announcedTools.clear();
         break;
 
       case "error":
-        // Handle errors
         this.emit({
           id: this.messageId++,
           content: `Error: ${message.data.error}`,
@@ -500,7 +357,6 @@ class IrisService {
         break;
 
       case "status":
-        // Handle status updates (like "processing...")
         this.emit({
           id: message.message_id,
           type: "typing",
@@ -517,23 +373,6 @@ class IrisService {
   subscribe(callback) {
     this.subscribers.add(callback);
     return () => this.subscribers.delete(callback);
-  }
-
-  async sendMessage(content, codebaseDir, outputDir) {
-    if (!this.isConnected || !this.websocket) {
-      throw new Error("WebSocket not connected");
-    }
-
-    const messageId = this.messageId++;
-
-    // Send message to WebSocket server
-    const wsMessage = {
-      type: "chat",
-      message: content,
-    };
-
-    this.websocket.send(JSON.stringify(wsMessage));
-    return { id: messageId };
   }
 
   emit(message) {

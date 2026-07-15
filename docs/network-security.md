@@ -5,184 +5,154 @@
 
 ## Overview
 
-IRIS implements defense-in-depth network security controls following AWS best practices for least privilege network access.
+IRIS is a serverless application built on Amazon Bedrock AgentCore Runtime and Amazon
+CloudFront. It has no customer-managed network layer — there are no VPCs, subnets,
+security groups, NAT gateways, or load balancers to configure. Network isolation is
+provided by AWS-managed services, and all traffic reaching IRIS is encrypted in transit
+and authenticated at the edge of the managed layer.
 
 ## Architecture
 
 ```
-Internet → CloudFront (HTTPS) → ALB (HTTP, CloudFront prefix list only) → ECS Tasks (private subnets)
-                                                                                ↓
-                                                                         VPC Endpoints + NAT Gateway
-                                                                         (Amazon S3, Amazon Bedrock, Amazon CloudWatch, Amazon ECR + Amazon Cognito)
+Browser ──HTTPS──▶ Amazon CloudFront (OAC) ──▶ Private Amazon S3 bucket   (static React app)
+
+Browser ──HTTPS──▶ Amazon Bedrock AgentCore Runtime data-plane            (chat / API)
+                   https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{arn}/invocations
+                   │
+                   ├─ managed Cognito JWT authorizer validates the bearer token
+                   │  BEFORE the request reaches the container
+                   │
+                   └─▶ per-session isolated microVM (agent process)
+                          └──▶ Amazon Bedrock (model invocation)
+                          └──▶ Amazon S3 (codebase artifacts, read-only, optional)
 ```
 
-**Note:** NAT Gateway is required for Cognito JWT validation as Cognito does not offer VPC endpoints. VPC endpoints are used for all other AWS services to minimize NAT Gateway data transfer costs.
+There are two independent paths from the browser, both over HTTPS/TLS:
+
+1. **Static frontend** — the React app is served from a private Amazon S3 bucket through
+   Amazon CloudFront using Origin Access Control (OAC). The bucket is never public.
+2. **Application (chat) traffic** — the browser invokes the AgentCore Runtime data-plane
+   endpoint directly. The Runtime's managed Amazon Cognito JWT authorizer validates the
+   bearer token before any request reaches the agent container.
+
+The AgentCore Runtime runs in AgentCore's AWS-managed network (`PUBLIC` network mode).
+Customers do not provision or manage VPCs, subnets, security groups, NACLs, or NAT
+gateways; the underlying compute network is owned and operated by the Runtime service.
 
 ## Security Controls
 
-### 1. Inbound Traffic Restrictions
+### 1. Inbound Traffic — Static Frontend (Amazon CloudFront + Amazon S3)
 
-**ALB Security Group:**
+- **Private origin bucket**: the frontend S3 bucket has `BlockPublicAccess.BLOCK_ALL`;
+  it is reachable only through CloudFront via Origin Access Control (OAC).
+- **HTTPS enforced**: the CloudFront distribution uses
+  `viewer_protocol_policy = REDIRECT_TO_HTTPS`, so HTTP viewer requests are redirected to
+  HTTPS.
+- **TLS 1.2 minimum**: `minimum_protocol_version = TLS_V1_2_2021`.
+- **Security response headers**: the AWS-managed `ResponseHeadersPolicy.SECURITY_HEADERS`
+  policy is attached at the edge (see [Security Headers Implementation](security-headers-implementation.md)).
+- **SPA routing**: 403/404 responses are mapped to `/index.html` for client-side routing.
 
-- Ingress: Only from CloudFront managed prefix list on port 80
-- No direct internet access (0.0.0.0/0 blocked)
-- CloudFront enforces HTTPS for end users
+### 2. Inbound Traffic — Application (Amazon Bedrock AgentCore Runtime)
 
-**ECS Task Security Group:**
+- **Direct HTTPS to the data plane**: the browser calls
+  `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{arn}/invocations` over TLS
+  and reads a Server-Sent Events (SSE) response. There is no persistent WebSocket and no
+  self-managed HTTP server exposed to the internet.
+- **Managed authentication at the boundary**: the Runtime's managed Cognito JWT authorizer
+  cryptographically validates the bearer token (issuer, signature, and expiry against the
+  Cognito user pool's OIDC discovery document, with `allowedClients` matched against the
+  token's `client_id` claim) **before** the request is forwarded to the container. Requests
+  without a valid token never reach the agent.
+- **Session isolation**: each `runtimeSessionId` runs in its own isolated microVM with
+  dedicated CPU, memory, and filesystem. The microVM (including its memory) is sanitized on
+  session termination, so no state leaks between sessions.
 
-- Ingress: Only from ALB security group
-- No direct internet access
-- Tasks deployed in private subnets (no public IPs)
+### 3. Outbound Traffic — Agent to AWS Services
 
-### 2. Outbound Traffic Restrictions
+The agent process inside the microVM reaches AWS services over the AgentCore-managed
+network using its scoped execution role (see [Security](security.md#identity-and-access-management)):
 
-**ECS Task Security Group Egress:**
+- **Amazon Bedrock**: model invocation (`bedrock:Invoke*`, `bedrock:Converse*`), scoped to
+  inference-profile and foundation-model ARNs.
+- **Amazon S3** (optional): read-only access (`s3:GetObject`, `s3:ListBucket`) to the
+  external codebase-artifacts bucket, plus optional `kms:Decrypt` when a customer managed
+  key is configured.
+- **Amazon CloudWatch Logs / AWS X-Ray**: telemetry, managed by the AgentCore Runtime
+  construct.
 
-- HTTPS (443): To Amazon VPC CIDR (for VPC endpoints) AND to internet (for Cognito JWKS)
-- DNS (53): Only to Amazon VPC CIDR (for name resolution)
-- Port 25 (SMTP): Explicitly blocked to prevent email abuse
-- All other outbound traffic: Blocked
+All of these calls use HTTPS (TLS 1.2+). Egress is bounded by the execution role's
+least-privilege policy rather than by customer-managed security groups.
 
-**NAT Gateway:**
+### 4. Edge Protection
 
-- Required for Cognito JWT validation (Cognito has no VPC endpoint)
-- VPC endpoints reduce NAT Gateway data transfer for other services
-- Cost: ~$32/month
-
-### 3. VPC Endpoints (PrivateLink)
-
-The following VPC endpoints are configured to keep traffic within AWS network:
-
-**Gateway Endpoints (Free):**
-
-- S3: For customer codebase artifacts
-
-**Interface Endpoints (~$14/month each for 2 AZs):**
-
-- Amazon Bedrock Runtime: For AI API calls
-- CloudWatch Logs: For application logging
-- ECR API: For pulling container images
-- ECR Docker: For pulling container layers
-
-**Total VPC Endpoint Cost:** ~$56/month for 2 AZs
-
-### 4. Amazon VPC Flow Logs
-
-Amazon VPC Flow Logs are enabled to CloudWatch Logs for:
-
-- Network traffic monitoring
-- Security incident investigation
-- Compliance auditing
+- **AWS Shield Standard** protects the Amazon CloudFront distribution automatically at no
+  additional cost.
+- **AWS WAF** is out of scope for this proof-of-value. Access to the application is gated by
+  the managed Cognito authorizer at the Runtime layer, which is why the deployment carries a
+  documented `AwsSolutions-CFR2` cdk-nag suppression. Operators who expose the distribution
+  to broad anonymous internet traffic SHOULD attach a WAF web ACL to CloudFront.
 
 ## Security Benefits
 
-1. **Defense in Depth**: Multiple layers of network controls
-2. **Least Privilege**: Only business-justified network paths allowed
-3. **Data Exfiltration Prevention**: No internet egress from ECS tasks
-4. **Lateral Movement Prevention**: Restricted communication between components
-5. **Email Abuse Prevention**: Port 25 explicitly blocked
-6. **Audit Trail**: Amazon VPC Flow Logs capture all network activity
+1. **No customer-managed network attack surface**: no VPCs, security groups, NACLs, or NAT
+   gateways to misconfigure.
+2. **Authentication before compute**: the managed authorizer rejects unauthenticated
+   requests before they reach application code.
+3. **Strong tenant/session isolation**: per-session microVMs with sanitized teardown.
+4. **Private static origin**: the frontend bucket is never publicly reachable (OAC only).
+5. **Encryption everywhere in transit**: browser → CloudFront and browser → AgentCore
+   data plane are both HTTPS; agent → AWS services is HTTPS.
+6. **Least-privilege egress**: the agent can only reach the specific AWS services and
+   resources granted to its execution role.
 
 ## Compliance
 
-This implementation satisfies the following security requirements:
+This implementation satisfies the following network security objectives:
 
-- ✅ Restrict inbound network access to business-justified use cases
-- ✅ Restrict outbound network access to business-justified use cases
-- ✅ Use VPC endpoints when possible to restrict egress traffic
-- ✅ Block SMTP port 25 to prevent email abuse
-- ✅ Use Amazon VPC Flow Logs to monitor network traffic
-- ✅ Implement least privilege network access controls
+- ✅ Restrict inbound access to authenticated, business-justified paths (Cognito authorizer)
+- ✅ Keep the static origin private (CloudFront OAC; S3 Block Public Access)
+- ✅ Enforce HTTPS/TLS 1.2+ on all viewer and service traffic
+- ✅ Restrict egress via least-privilege IAM on the execution role
+- ✅ Isolate workloads per session (dedicated microVM, sanitized on termination)
 
 ## Verification
 
-### Manual Verification
+### Confirm the static frontend origin is private
 
-1. **Review Security Groups:**
+```bash
+# Bucket should report BlockPublicAccess = ALL true
+aws s3api get-public-access-block --bucket <frontend-bucket-name>
 
-   ```bash
-   aws ec2 describe-security-groups \
-     --filters "Name=tag:aws:cloudformation:stack-name,Values=<stack-name>" \
-     --query 'SecurityGroups[*].[GroupId,GroupName,IpPermissions,IpPermissionsEgress]'
-   ```
+# CloudFront distribution should use OAC and REDIRECT_TO_HTTPS
+aws cloudfront get-distribution-config --id <distribution-id>
+```
 
-2. **Verify VPC Endpoints:**
+### Confirm the Runtime enforces authentication
 
-   ```bash
-   aws ec2 describe-vpc-endpoints \
-     --filters "Name=vpc-id,Values=<vpc-id>" \
-     --query 'VpcEndpoints[*].[VpcEndpointId,ServiceName,State]'
-   ```
+1. Invoke the data-plane endpoint **without** an `Authorization` header — the request MUST
+   be rejected by the managed authorizer (HTTP 401/403) before reaching the agent.
+2. Invoke with a valid Cognito **access** token — the request succeeds and streams SSE
+   events.
 
-3. **Check Amazon VPC Flow Logs:**
-   ```bash
-   aws ec2 describe-flow-logs \
-     --filter "Name=resource-id,Values=<vpc-id>"
-   ```
+```bash
+# Expect a 401/403 (no bearer token)
+curl -i -X POST \
+  "https://bedrock-agentcore.<region>.amazonaws.com/runtimes/<arn>/invocations?qualifier=DEFAULT" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"hello"}'
+```
 
-### Testing
+### Inspect the execution role (egress scope)
 
-1. **Test Outbound Connectivity:**
-   - ECS tasks should be able to call Amazon Bedrock API
-   - ECS tasks should be able to write to CloudWatch Logs
-   - ECS tasks should be able to read from S3
-   - ECS tasks should NOT be able to reach internet
-
-2. **Test Inbound Connectivity:**
-   - CloudFront URL should be accessible
-   - Direct ALB URL should NOT be accessible from internet
-   - Only CloudFront can reach ALB
-
-## Cost Analysis
-
-**Configuration:**
-
-- NAT Gateway: $32.40/month (required for Cognito)
-- S3 Gateway Endpoint: $0
-- Amazon Bedrock Interface Endpoint: $14.40/month (2 AZs)
-- CloudWatch Logs Interface Endpoint: $14.40/month (2 AZs)
-- ECR API Interface Endpoint: $14.40/month (2 AZs)
-- ECR Docker Interface Endpoint: $14.40/month (2 AZs)
-- **Total: ~$90/month**
-
-**Savings from VPC Endpoints:**
-
-- Reduced NAT Gateway data transfer costs (Amazon Bedrock, S3, CloudWatch, ECR traffic stays in AWS network)
-- Estimated savings: $10-20/month in data transfer
-
-**Net Cost vs No VPC Endpoints:**
-
-- Without VPC endpoints: ~$35/month (NAT Gateway + data transfer)
-- With VPC endpoints: ~$90/month
-- **Net increase: ~$55/month** for improved security and reduced data transfer
-
-## Troubleshooting
-
-### ECS Tasks Can't Pull Images
-
-**Symptom:** Tasks fail to start with "CannotPullContainerError"
-
-**Solution:** Verify ECR VPC endpoints are configured:
-
-- ECR API endpoint
-- ECR Docker endpoint
-- S3 Gateway endpoint (for image layers)
-
-### ECS Tasks Can't Call Amazon Bedrock
-
-**Symptom:** Amazon Bedrock API calls timeout or fail
-
-**Solution:** Verify Amazon Bedrock Runtime VPC endpoint is configured with private DNS enabled
-
-### ECS Tasks Can't Write Logs
-
-**Symptom:** No logs appearing in CloudWatch Logs
-
-**Solution:** Verify CloudWatch Logs VPC endpoint is configured with private DNS enabled
+```bash
+aws iam list-role-policies --role-name <AgentCoreExecutionRole>
+aws iam get-role-policy --role-name <AgentCoreExecutionRole> --policy-name <policy>
+```
 
 ## References
 
-- [AWS VPC Endpoints](https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints.html)
-- [AWS Security Groups](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_SecurityGroups.html)
-- [Amazon VPC Flow Logs](https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html)
-- [Amazon Bedrock VPC Endpoints](https://docs.aws.amazon.com/bedrock/latest/userguide/vpc-interface-endpoints.html)
+- [Amazon Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime.html)
+- [Restricting access to an Amazon S3 origin (CloudFront OAC)](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [Amazon CloudFront and AWS Shield Standard](https://docs.aws.amazon.com/waf/latest/developerguide/ddos-overview.html)
+- [Amazon Cognito user pools](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-identity-pools.html)

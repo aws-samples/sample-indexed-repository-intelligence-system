@@ -59,8 +59,8 @@ IRIS is designed to encrypt all data at rest to help protect your content.
 **Service Data (Logs and Metadata):**
 
 - CloudWatch Logs: Encrypted by default with AWS-owned keys
-- ALB/CloudFront Access Logs: Encrypted by default in S3
-- Amazon VPC Flow Logs: Encrypted by default with AWS-owned keys
+- CloudFront Access Logs: Stored in Amazon S3, encrypted with SSE-S3
+- Amazon S3 Server Access Logs: Stored in Amazon S3, encrypted with SSE-S3
 
 **Configuration:**
 
@@ -79,23 +79,23 @@ See [Encryption at Rest documentation](encryption-at-rest.md) for complete setup
 
 IRIS is designed to encrypt all data in transit using TLS 1.2 or higher.
 
-**Client to CloudFront:**
+**Browser to CloudFront (static frontend):**
 
 - HTTPS enforced (HTTP redirects to HTTPS)
 - TLS 1.2+ with strong cipher suites
 - AWS-managed SSL certificate
 
-**CloudFront to Application Load Balancer:**
+**Browser to Amazon Bedrock AgentCore Runtime (chat/API):**
 
-- HTTP over AWS internal network
-- Protected by security groups (CloudFront prefix list only)
-- Physical layer encryption via AWS Nitro System
+- The browser invokes the Runtime data-plane endpoint
+  (`https://bedrock-agentcore.{region}.amazonaws.com/...`) directly over HTTPS/TLS
+- The managed Cognito JWT authorizer validates the bearer token before the request reaches
+  the agent container
 
-**Application to AWS Services:**
+**Agent to AWS Services:**
 
 - All AWS API calls use HTTPS (TLS 1.2+)
-- Amazon VPC endpoints for private connectivity to S3, Amazon Bedrock, CloudWatch
-- Cognito JWKS validation over HTTPS
+- Amazon Bedrock model invocation and (optional) Amazon S3 reads over TLS
 
 **Configuration:**
 
@@ -108,7 +108,7 @@ IRIS processes data in the AWS region where the customer deploys the stack. Code
 **Data Flow:**
 
 1. Customer uploads codebase to their S3 bucket
-2. ECS tasks read from the customer's S3 bucket (same region)
+2. The AgentCore Runtime agent reads from the customer's S3 bucket (same region)
 3. Amazon Bedrock API calls use regions configured by the customer
 4. All processing occurs in the customer's AWS account
 
@@ -122,17 +122,12 @@ IRIS processes data in the AWS region where the customer deploys the stack. Code
 
 **Service Data:**
 
-- CloudWatch Logs: Configurable retention (default 7 days)
-- Access Logs: Stored in S3 with lifecycle policies
-- In-memory data: Cleared when ECS tasks terminate
-
-**Configuration:**
-
-```yaml
-# infra/config.yaml
-logging:
-  retention_days: 7 # CloudWatch Logs retention
-```
+- CloudWatch Logs: The AgentCore Runtime emits application logs to the AWS-managed
+  log group `/aws/bedrock-agentcore/runtimes/*`. The log group and its retention are
+  managed by the Runtime; the IRIS stack does not create it or set a retention policy.
+- Access Logs: Amazon CloudFront and Amazon S3 access logs are stored in S3
+- In-memory / per-session data: The AgentCore Runtime runs each session in an isolated
+  microVM whose memory and filesystem are sanitized when the session terminates
 
 ---
 
@@ -163,18 +158,21 @@ See [User Management Guide](user-management.md) for creating and managing users.
 
 **IAM Roles:**
 
-- ECS Task Role: Grants permissions to access AWS services
-- ECS Execution Role: Grants permissions to pull images and write logs
+- AgentCore Runtime Execution Role: Trusts `bedrock-agentcore.amazonaws.com` and grants the
+  agent permission to access AWS services
 - No IAM users or long-lived credentials
 
 **Least Privilege:**
 
-- Amazon Bedrock: `Invoke*` and `Converse*` actions (required for AI functionality)
-- S3: `GetObject` and `ListBucket` scoped to your bucket
-- KMS: `Decrypt` and `DescribeKey` scoped to your key (if CMK configured)
-- CloudWatch: `CreateLogStream` and `PutLogEvents` for application logs
+- Amazon Bedrock: `Invoke*` and `Converse*` actions (required for AI functionality), scoped
+  to inference-profile and foundation-model ARNs
+- Amazon Bedrock Guardrails: `ApplyGuardrail` scoped to your Guardrail ARN (if configured)
+- S3: `GetObject` and `ListBucket` scoped to your codebase-artifacts bucket (if configured)
+- KMS: `Decrypt` and `DescribeKey` scoped to your key (if a CMK is configured for the bucket)
+- CloudWatch Logs / AWS X-Ray / AgentCore workload identity: added and scoped by the
+  AgentCore Runtime construct
 
-**Example IAM Policy:**
+**Example IAM Policy (execution role):**
 
 ```json
 {
@@ -183,7 +181,11 @@ See [User Management Guide](user-management.md) for creating and managing users.
     {
       "Effect": "Allow",
       "Action": ["bedrock:Invoke*", "bedrock:Converse*"],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:bedrock:*::inference-profile/*",
+        "arn:aws:bedrock:*:account-id:inference-profile/*",
+        "arn:aws:bedrock:*::foundation-model/*"
+      ]
     },
     {
       "Effect": "Allow",
@@ -199,20 +201,32 @@ See [User Management Guide](user-management.md) for creating and managing users.
 }
 ```
 
+> **Note:** The wildcard on Bedrock model/region is required because system-defined
+> inference profiles and foundation models have no account ID in their ARNs and any
+> configured model must be supported. This is covered by a documented `AwsSolutions-IAM5`
+> cdk-nag suppression in `infra/stack.py`.
+
 ### Session Management
 
 **JWT Tokens:**
 
 - Issued by Cognito upon successful authentication
-- Stored in browser memory (not localStorage or cookies)
-- Automatic expiration and refresh
-- Validated on every WebSocket connection
+- The frontend sends the Cognito **access token** (which carries the `client_id` claim) as
+  a bearer token on each Runtime invocation
+- Automatic expiration and refresh handled by the Amplify auth session
 
-**WebSocket Security:**
+**Request Authentication:**
 
-- JWT token required for WebSocket upgrade
-- Token validated against Cognito JWKS endpoint
-- Connections terminated on token expiration
+- The AgentCore Runtime's managed Cognito JWT authorizer validates the bearer token
+  cryptographically (issuer, signature, and expiry against the user pool's OIDC discovery
+  document) **before** the request reaches the agent container
+- `allowedClients` is set to the Cognito app client ID and is matched against the token's
+  `client_id` claim (this is why the access token is sent, not the ID token — the ID token
+  carries `aud` instead of `client_id` and would be rejected)
+- Because validation happens at the managed layer, there is no application-level JWT
+  verification code to maintain
+- Each browser conversation uses a stable `runtimeSessionId`, and the Runtime isolates each
+  session in its own microVM
 
 ---
 
@@ -224,51 +238,44 @@ IRIS logs all application events to CloudWatch Logs.
 
 **Log Groups:**
 
-- `/ecs/frontend` - React application logs
-- `/ecs/backend` - Python backend logs
+- `/aws/bedrock-agentcore/runtimes/*` - AgentCore Runtime agent logs (managed by the
+  Runtime construct)
 
 **Logged Events:**
 
-- Authentication attempts (success/failure)
-- API requests and responses
+- Agent invocations and tool use
 - Error conditions and exceptions
-- WebSocket connections and disconnections
+- Guardrail interventions (when a Guardrail is configured)
 
 **Log Sanitization:**
 
-- PII automatically redacted from logs
-- Sensitive data never logged
-- Request/response bodies sanitized
+- User-controlled values are sanitized before logging via `sanitize_for_log()` in
+  `backend/security_utils.py` (strips newlines, carriage returns, ASCII control characters,
+  and ANSI escape codes; truncates to 200 characters)
+- Error types are logged via `get_safe_error_type()` rather than raw exception text
+- Sensitive data is never logged
 
-**Configuration:**
+**Retention:**
 
-```yaml
-# infra/config.yaml
-logging:
-  retention_days: 7 # Adjust based on compliance requirements
-```
-
-For compliance requirements (e.g., 10-year retention), increase `retention_days` to 3650.
+The `/aws/bedrock-agentcore/runtimes/*` log group is created and managed by the AgentCore
+Runtime; the IRIS stack does not set its retention policy. To enforce a specific retention
+period (for example for compliance), set retention on that log group directly in CloudWatch
+Logs, or add a `logs.CfnRetentionPolicy` / log-group construct to `infra/stack.py`.
 
 ### Access Logs
 
-**Application Load Balancer:**
+**Amazon CloudFront:**
 
-- HTTP request metadata logged to S3
-- Includes source IP, request path, response codes
-- No request/response bodies
-
-**CloudFront:**
-
-- CDN request metadata logged to S3
+- CDN request metadata logged to a dedicated Amazon S3 bucket
 - Includes edge location, viewer location, cache status
 - No request/response bodies
 
-**Amazon VPC Flow Logs:**
+**Amazon S3 Server Access Logs:**
 
-- Network traffic metadata logged to CloudWatch
-- Includes source/destination IPs, ports, protocols
-- No packet contents
+- Bucket access metadata (frontend bucket and CloudFront logs bucket) logged to a dedicated
+  server-access-logs S3 bucket
+- Includes requester, operation, and response status
+- No object contents
 
 ### CloudTrail
 
@@ -304,13 +311,13 @@ IRIS offers features that can help customers address compliance requirements for
 - Encryption at rest with FIPS-compliant KMS keys
 - Encryption in transit with TLS 1.2+
 - CloudTrail logging for audit trails
-- Amazon VPC isolation and network security
+- Managed, isolated compute (per-session AgentCore microVMs)
 
 **HIPAA:**
 
 - Customer Managed Keys for PHI encryption
 - Access logging and monitoring
-- Network isolation via Amazon VPC
+- Managed workload isolation via AgentCore Runtime
 - No PHI in application logs
 
 **PCI-DSS:**
@@ -318,7 +325,7 @@ IRIS offers features that can help customers address compliance requirements for
 - Strong encryption (AES-256 at rest, TLS 1.2+ in transit)
 - Access controls via IAM and Cognito
 - Logging and monitoring
-- Network segmentation
+- Managed per-session workload isolation
 
 **GDPR:**
 
@@ -340,7 +347,8 @@ IRIS offers features that can help customers address compliance requirements for
 
 1. Use Customer Managed KMS keys (SSE-KMS, not SSE-S3)
 2. Enable CloudTrail in your account
-3. Set log retention to 10 years (3650 days)
+3. Set log retention to 10 years (3650 days) on the AgentCore Runtime log group
+   directly in CloudWatch Logs (the stack does not manage log retention)
 4. Deploy in FedRAMP-authorized regions
 
 ```yaml
@@ -348,16 +356,13 @@ IRIS offers features that can help customers address compliance requirements for
 codebase_artifacts:
   bucket: "your-bucket"
   kms_key_arn: "arn:aws:kms:us-gov-west-1:account:key/key-id"
-
-logging:
-  retention_days: 3650 # 10 years
 ```
 
 **For HIPAA Compliance:**
 
 1. Sign AWS Business Associate Addendum (BAA)
 2. Use Customer Managed Keys for PHI
-3. Enable CloudTrail and Amazon VPC Flow Logs
+3. Enable CloudTrail
 4. Implement access controls via Cognito
 
 ---
@@ -366,38 +371,30 @@ logging:
 
 ### High Availability
 
-**Multi-AZ Deployment:**
+**Managed, serverless availability:**
 
-- Amazon VPC spans 2 Availability Zones (configurable)
-- Application Load Balancer distributes traffic across AZs
-- ECS tasks can run in multiple AZs
-- CloudFront provides global edge caching
+- Amazon Bedrock AgentCore Runtime is a fully managed, serverless backend — AWS handles
+  capacity, availability, and scaling of the underlying compute
+- Each session runs in its own microVM; the Runtime provisions per-session microVMs on
+  demand, so there is no fixed pool of servers to size or balance
+- Amazon CloudFront provides global edge caching and delivery for the static frontend
+- The static frontend and CloudFront access/logging buckets have S3 versioning enabled
 
 **Configuration:**
 
-```yaml
-# infra/config.yaml
-service:
-  desired_count: 2 # Run tasks in multiple AZs
-  max_azs: 2 # Use 2 Availability Zones
-```
+No availability configuration is required — capacity and multi-AZ resilience of the managed
+Runtime are handled by AWS.
 
 ### Fault Tolerance
 
 **Automatic Recovery:**
 
-- ECS automatically restarts failed tasks
-- Health checks monitor application status
-- ALB removes unhealthy targets from rotation
-- CloudFront fails over to healthy origins
-
-**Health Checks:**
-
-- Frontend: HTTP GET to `/` (port 3000)
-- Backend: HTTP GET to `/health` (port 8000)
-- Interval: 30 seconds
-- Timeout: 10 seconds
-- Unhealthy threshold: 3 consecutive failures
+- The AgentCore Runtime manages the health and lifecycle of session microVMs; failed or
+  terminated microVMs do not affect other sessions
+- Amazon CloudFront serves the static frontend from a private Amazon S3 origin with global
+  edge redundancy
+- The Runtime provides a health-check (`/ping`) contract that is handled automatically by
+  the AgentCore harness
 
 ### Backup and Recovery
 
@@ -427,39 +424,24 @@ aws s3api put-bucket-lifecycle-configuration \
 
 ### Network Security
 
-IRIS is designed to implement defense-in-depth network security controls.
+IRIS is serverless and has no customer-managed network layer — there are no VPCs, subnets,
+security groups, NACLs, or NAT gateways to configure. Network isolation is provided by the
+AWS-managed AgentCore Runtime and Amazon CloudFront.
 
-**Amazon VPC Configuration:**
+**Network model:**
 
-- Private subnets for ECS tasks (no direct internet access)
-- Public subnets for Application Load Balancer
-- NAT Gateway for outbound internet access (Cognito only)
-- Amazon VPC Flow Logs enabled
-
-**Amazon VPC Endpoints:**
-
-- S3 Gateway Endpoint (private S3 access)
-- Amazon Bedrock Runtime Interface Endpoint
-- CloudWatch Logs Interface Endpoint
-- ECR API and Docker Interface Endpoints
-
-**Security Groups:**
-
-_Application Load Balancer:_
-
-- Ingress: Port 80 from CloudFront prefix list only
-- Egress: Port 3000 to ECS tasks
-
-_ECS Tasks:_
-
-- Ingress: Port 3000 and 8000 from ALB only
-- Egress: HTTPS (443) to Amazon VPC endpoints and Cognito
-- Egress: DNS (53) for name resolution
-- Port 25 (SMTP) explicitly blocked
+- The static React app is served from a private Amazon S3 bucket through Amazon CloudFront
+  using Origin Access Control (OAC); the bucket is never public
+- The browser invokes the AgentCore Runtime data-plane endpoint directly over HTTPS; the
+  managed Cognito JWT authorizer validates the token before it reaches the agent container
+- The Runtime uses `PUBLIC` network mode, managed by the AgentCore service; each session
+  runs in its own isolated microVM
+- The agent reaches Amazon Bedrock and (optionally) Amazon S3 over HTTPS, bounded by the
+  least-privilege execution role
 
 **Configuration:**
 
-See [Network Security Guide](network-security.md) for detailed architecture.
+See [Network Security Guide](network-security.md) for the detailed architecture.
 
 ### DDoS Protection
 
@@ -467,39 +449,38 @@ See [Network Security Guide](network-security.md) for detailed architecture.
 
 - Automatic protection against common DDoS attacks
 - Included at no additional cost
-- Protects CloudFront and ALB
+- Protects Amazon CloudFront
 
-**CloudFront:**
+**Amazon CloudFront:**
 
-- Global edge network absorbs traffic spikes
+- Global edge network absorbs traffic spikes for the static frontend
 - Geographic restrictions available
-- Rate limiting via AWS WAF (optional)
+- Rate limiting via AWS WAF (optional; out of scope for this proof-of-value)
 
-**Application Load Balancer:**
+**Amazon Bedrock AgentCore Runtime:**
 
-- Connection draining and request buffering
-- Slow loris attack protection
-- HTTP flood protection
+- Access is gated by the managed Cognito JWT authorizer, so unauthenticated traffic is
+  rejected before reaching the agent
+- Per-session microVMs mean a heavy or abusive session is isolated from other sessions
+  (resource-exhaustion and cost concerns are discussed in the [Threat Model](THREAT_MODEL.md))
 
 ### Container Security
 
 **Non-Root Execution:**
 
-- Containers run as non-root user `appuser`
+- The agent container runs as the non-root user `appuser`
 - No sudo or root privileges
-- File permissions restricted to application user
+- File permissions restricted to the application user
 
 **Image Security:**
 
-- Base images from official sources (Python, Node.js)
+- Built from an official minimal base image, as an ARM64 image (required by the Runtime)
 - Security patches applied during build
-- Vulnerability scanning via ECR (optional)
 
-**Runtime Security:**
+**Runtime Isolation:**
 
-- Read-only root filesystem (where possible)
-- No privileged containers
-- Resource limits enforced (CPU, memory)
+- Each session executes in its own AgentCore microVM with a dedicated, ephemeral filesystem
+- The microVM and its memory are sanitized on session termination
 
 ---
 
@@ -507,10 +488,11 @@ See [Network Security Guide](network-security.md) for detailed architecture.
 
 ### Security Scanning
 
-**Container Images:**
+**Container Image:**
 
-- Scan images with Amazon ECR image scanning
-- Automated scanning on push
+- The agent container image is built as part of the CDK deployment; scan it with your
+  registry's image scanning (for example, Amazon ECR image scanning) if you push it to a
+  repository
 - CVE detection and reporting
 
 **Dependencies:**
@@ -522,11 +504,6 @@ See [Network Security Guide](network-security.md) for detailed architecture.
 **Configuration:**
 
 ```bash
-# Enable ECR scanning
-aws ecr put-image-scanning-configuration \
-  --repository-name iris \
-  --image-scanning-configuration scanOnPush=true
-
 # Scan Python dependencies
 pip-audit
 
@@ -536,21 +513,19 @@ npm audit
 
 ### Security Headers
 
-IRIS implements security headers at multiple layers.
+IRIS applies security headers to the static frontend at the Amazon CloudFront edge using
+the AWS-managed `ResponseHeadersPolicy.SECURITY_HEADERS` policy.
 
-**CloudFront Response Headers:**
+**CloudFront Response Headers (managed policy):**
 
-- `X-Frame-Options: DENY`
+- `Strict-Transport-Security: max-age=31536000`
 - `X-Content-Type-Options: nosniff`
-- `Strict-Transport-Security: max-age=47304000; includeSubDomains`
-- `Content-Security-Policy: default-src 'self'`
-- `Cache-Control: no-store, no-cache`
+- `X-Frame-Options: SAMEORIGIN`
+- `X-XSS-Protection: 1; mode=block`
+- `Referrer-Policy: strict-origin-when-cross-origin`
 
-**Backend Middleware:**
-
-- Security headers added to all HTTP responses
-- CORS configured for frontend origin only
-- No sensitive data in response headers
+XSS defense for AI-generated content is additionally enforced in the React rendering
+pipeline (`skipHtml`, Mermaid `securityLevel: strict`, and DOMPurify).
 
 See [Security Headers Implementation](security-headers-implementation.md) for details.
 
@@ -558,33 +533,22 @@ See [Security Headers Implementation](security-headers-implementation.md) for de
 
 **Container Image Patching:**
 
-IRIS uses containerized deployments (ECS Fargate) with Python and Node.js base images. You are responsible for keeping container images patched and up-to-date.
-
-**Enable ECR Image Scanning:**
-
-Amazon ECR provides automated vulnerability scanning for container images using Amazon Inspector.
-
-```bash
-# Enable scanning on push for your ECR repositories
-aws ecr put-image-scanning-configuration \
-  --repository-name iris-backend \
-  --image-scanning-configuration scanOnPush=true
-
-aws ecr put-image-scanning-configuration \
-  --repository-name iris-frontend \
-  --image-scanning-configuration scanOnPush=true
-```
+The IRIS agent runs as a container image on Amazon Bedrock AgentCore Runtime, built from a
+Python base image. You are responsible for keeping the image and its dependencies patched
+and up-to-date.
 
 **Patching Process:**
 
 1. **Monitor for CVEs:**
-   - Enable ECR image scanning (see above)
+   - Scan the built image with your registry's image scanning (for example, Amazon ECR
+     image scanning with Amazon Inspector) if you push it to a repository
    - Subscribe to security advisories for Python and Node.js
-   - Review ECR scan results regularly in AWS Console
+   - Review scan results regularly
 
 2. **Update Base Images:**
-   - Backend: Update Python base image in `backend/Dockerfile`
-   - Frontend: Update Node.js base image in `frontend/Dockerfile`
+   - Agent: Update the Python base image in `backend/Dockerfile.agentcore` (or
+     `backend/Dockerfile.agentcore_s3` for S3 mode)
+   - Frontend build: Update the Node.js base image in `frontend/Dockerfile`
 
 3. **Update Dependencies:**
    - Python: Update `pyproject.toml` and rebuild
@@ -598,19 +562,19 @@ aws ecr put-image-scanning-configuration \
    ```
 
 5. **Verify Patching:**
-   - Check ECR scan results after deployment
+   - Re-scan the rebuilt image
    - Verify no HIGH or CRITICAL vulnerabilities remain
 
 **Patching Strategy:**
 
-- Review ECR scan results weekly
+- Review scan results weekly
 - Patch CRITICAL vulnerabilities within 7 days
 - Patch HIGH vulnerabilities within 30 days
 - Update base images monthly for routine maintenance
 
 **Monitoring:**
 
-- Enable ECR image scanning for automated CVE detection
+- Enable image scanning for automated CVE detection
 - Subscribe to security advisories for dependencies
 - Use AWS Security Hub for centralized vulnerability management
 - Set up CloudWatch alarms for new HIGH/CRITICAL findings

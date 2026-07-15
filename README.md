@@ -3,13 +3,15 @@
 
 # Indexed Repository Intelligence System (IRIS)
 
-The Indexed Repository Intelligence System (IRIS) is an intelligent codebase understanding tool that leverages Large Language Models (LLMs) and agentic systems to analyze codebases, generate structured overviews, and provide detailed answers to user queries. It enables both technical and non-technical audiences to quickly understand unfamiliar code, troubleshoot issues, and extract insights through natural language interaction. IRIS offers CLI and UI interfaces, with both local and deployed versions available.
+IRIS is an intelligent codebase understanding tool built on AWS-native primitives such as AgentCore and Strands Agents. It analyzes codebases, generates structured overviews, and answers questions in depth, helping both technical and non-technical audiences quickly understand unfamiliar code, troubleshoot issues, and extract insights.
+
+IRIS offers CLI and UI interfaces in both local and deployed configurations. Use it as an onboarding and knowledge-transfer tool, or as a template for embedding codebase understanding into your own applications.
 
 ## Project Overview
 
 IRIS provides:
 
-- **Automatic codebase analysis and summarization**
+- **Automatic codebase summarization**
 - **Intelligent file selection based on user queries**
 - **Multi-turn conversation support**
 - **Prompt caching for improved performance**

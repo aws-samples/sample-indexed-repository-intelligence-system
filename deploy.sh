@@ -117,7 +117,7 @@ run_installation() {
     echo ""
     echo "2. Then use available iris commands:"
     echo ""
-    echo "  iris chat               - Interactive chat with file editing"
+    echo "  iris chat               - Interactive chat"
     echo "  iris ui                 - Launch ReAct UI"
     echo "  iris streamlit          - Launch legacy Streamlit UI"
     echo "  iris prepare            - Generate/update codebase context"
@@ -971,7 +971,7 @@ local_test_no_docker() {
     echo "1. Configure directories"
     echo "2. Validate project tree"
     echo "3. Generate codebase summary"
-    echo "4. Start backend server (websocket_server.py)"
+    echo "4. Start backend server (AgentCore Runtime: agent_runtime.py)"
     echo "5. Start frontend dev server (npm start)"
     echo ""
 
@@ -1007,10 +1007,11 @@ local_test_no_docker() {
         echo ""
         echo "Terminal 1 (Backend):"
         echo "  cd $SCRIPT_DIR/backend"
+        echo "  export ALLOW_ANONYMOUS=true CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000"
         if command -v uv &> /dev/null; then
-            echo "  uv run python websocket_server.py"
+            echo "  uv run python agent_runtime.py"
         else
-            echo "  python websocket_server.py"
+            echo "  python agent_runtime.py"
         fi
         echo ""
         echo "Terminal 2 (Frontend):"
@@ -1029,14 +1030,16 @@ local_test_no_docker() {
         cd "$SCRIPT_DIR"
     fi
 
-    print_info "Starting backend server..."
+    print_info "Starting backend server (AgentCore Runtime)..."
     cd "$SCRIPT_DIR/backend"
-    # Allow unauthenticated access for local testing (no Cognito configured)
+    # Allow unauthenticated access for local testing (no Cognito configured) and
+    # enable CORS so the React dev server (:3000) can call the agent (:8080).
     export ALLOW_ANONYMOUS=true
+    export CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
     if command -v uv &> /dev/null; then
-        uv run python websocket_server.py > "$SCRIPT_DIR/backend.log" 2>&1 &
+        uv run python agent_runtime.py > "$SCRIPT_DIR/backend.log" 2>&1 &
     else
-        python websocket_server.py > "$SCRIPT_DIR/backend.log" 2>&1 &
+        python agent_runtime.py > "$SCRIPT_DIR/backend.log" 2>&1 &
     fi
     BACKEND_PID=$!
     cd "$SCRIPT_DIR"
@@ -1285,41 +1288,44 @@ show_project_tree() {
 }
 
 # Function for cloud deployment
-cloud_deploy_workflow() {
-    print_header "Cloud Deployment Wizard"
+
+# Serverless cloud deployment on Amazon Bedrock AgentCore Runtime.
+# Deploys the Runtime + S3/CloudFront static frontend, then builds and uploads the
+# frontend with the AgentRuntimeArn injected.
+cloud_deploy_agentcore() {
+    print_header "Cloud Deployment Wizard (AgentCore Runtime)"
 
     if ! ensure_docker_daemon; then
         return 1
     fi
-
     if ! validate_aws_credentials; then
         return 1
     fi
 
-    echo "This wizard will guide you through deploying to AWS."
+    echo "This deploys IRIS to AWS using Amazon Bedrock AgentCore Runtime."
+    echo "The browser invokes the Runtime directly (Cognito JWT auth) and the"
+    echo "React app is served from S3 via CloudFront."
     echo ""
 
-    # Step 1: Configure directories and generate Docker config
+    # Step 1: Configurations (codebase dir + docker config)
     print_header "Step 1: Configurations"
     if ! configure_directories_and_generate_docker_config; then
         return 1
     fi
 
-    # Step 2: S3 Bucket Setup
+    # Step 2: S3 bucket for codebase artifacts (Runtime pulls index at boot)
     print_header "Step 2: S3 Bucket Configuration"
     if ! bucket_name=$(setup_s3_bucket); then
         return 1
     fi
     echo ""
 
-    # Step 3: Region Selection
+    # Step 3: Region
     print_header "Step 3: AWS Region Selection"
     read -r -e -p "Enter AWS region for deployment [us-east-1]: " deploy_region
     deploy_region=${deploy_region:-us-east-1}
-    # Export the region to environment variables so CDK can pick it up
     export AWS_DEFAULT_REGION="$deploy_region"
     export AWS_REGION="$deploy_region"
-
     print_success "Region set to: $deploy_region"
     echo ""
 
@@ -1344,6 +1350,7 @@ cloud_deploy_workflow() {
                 new_stack_name=${new_stack_name:-$current_stack_name}
                 if [ -n "$new_stack_name" ]; then
                     update_app_name "$new_stack_name"
+                    current_stack_name="$new_stack_name"
                 else
                     print_warning "Stack name cannot be empty. Keeping current name: $current_stack_name"
                 fi
@@ -1389,43 +1396,30 @@ cloud_deploy_workflow() {
     done
     echo ""
 
-    # Step 5: Generate and Upload Artifacts
-    print_header "Step 5: Generate & Upload Artifacts"
-
-    # Show project tree and get confirmation before generating artifacts
+    # Step 5: Generate & upload artifacts to S3 (the index the Runtime pulls at boot)
+    print_header "Step 5: Generate & Upload Artifacts to S3"
     if ! show_project_tree; then
         return 1
     fi
-
+    cd "$SCRIPT_DIR"
     if command -v uv &> /dev/null; then
-        print_info "Syncing dependencies..."
-        cd "$SCRIPT_DIR"
         uv sync
-        print_info "Generating codebase summary and uploading to S3..."
-        # Ensure PATH includes common binary locations
         export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-        if uv run python backend/scripts/generate_summary.py --s3-bucket "$bucket_name"; then
-            print_success "Artifacts uploaded to S3"
-        else
+        if ! uv run python backend/scripts/generate_summary.py --s3-bucket "$bucket_name"; then
             print_error "Failed to upload artifacts"
             return 1
         fi
     else
-        print_info "Generating codebase summary and uploading to S3..."
         cd "$SCRIPT_DIR/backend"
-        if python scripts/generate_summary.py --s3-bucket "$bucket_name"; then
-            cd "$SCRIPT_DIR"
-            print_success "Artifacts uploaded to S3"
-        else
-            cd "$SCRIPT_DIR"
-            print_error "Failed to upload artifacts"
-            return 1
+        if ! python scripts/generate_summary.py --s3-bucket "$bucket_name"; then
+            cd "$SCRIPT_DIR"; print_error "Failed to upload artifacts"; return 1
         fi
+        cd "$SCRIPT_DIR"
     fi
-    cd "$SCRIPT_DIR"
+    print_success "Artifacts uploaded to S3"
     echo ""
 
-    # Step 6: Deploy Infrastructure
+    # Step 6: Deploy Infrastructure with CDK
     print_header "Step 6: Deploy Infrastructure with CDK"
 
     print_info "This will deploy the infrastructure to AWS..."
@@ -1487,84 +1481,121 @@ cloud_deploy_workflow() {
     print_info "Starting deployment (this may take several minutes)..."
 
     # shellcheck disable=SC2086
-    if ! ${cdk_prefix}cdk deploy --context region="$deploy_region" --app "$app_path"; then
-        deploy_result=1
-    else
-        deploy_result=0
-    fi
-
-    if [ $deploy_result -eq 0 ]; then
-        print_success "Deployment complete!"
-        echo ""
-
-        # Extract CloudFormation stack outputs
-        print_info "Extracting deployment outputs..."
-        print_info "Stack name: $current_stack_name"
-        print_info "Region: $deploy_region"
-
-        # Wait for outputs to be available (retry up to 5 times with 5 second delay)
-        for i in {1..5}; do
-            cloudfront_url=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CloudFrontURL'].OutputValue" --output text 2>/dev/null || echo "")
-            cognito_pool_url=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolUrl'].OutputValue" --output text 2>/dev/null || echo "")
-
-            print_info "Attempt $i: cloudfront_url='$cloudfront_url', cognito_pool_url='$cognito_pool_url'"
-
-            if [ -n "$cloudfront_url" ] && [ -n "$cognito_pool_url" ]; then
-                break
-            fi
-
-            if [ "$i" -lt 5 ]; then
-                sleep 5
-            fi
-        done
-
-        # Step 7: Post-Deployment Instructions
-        print_header "Post-Deployment Steps"
-        if [ -n "${cloudfront_url:-}" ] && [ "$cloudfront_url" != "None" ]; then
-            echo "✅ Application URL: $cloudfront_url"
-        else
-            echo "⚠️  Application URL: Check CloudFormation Stack Outputs"
-        fi
-        echo ""
-        echo "1. Create Cognito Users:"
-        if [ -n "${cognito_pool_url:-}" ] && [ "$cognito_pool_url" != "None" ]; then
-            echo "   - User Pool Console:"
-            print_info "  $cognito_pool_url"
-        fi
-        echo "   - Go to AWS Console → CloudFormation → Your Stack → Resources"
-        echo "   - Find and click on the Cognito User Pool"
-        echo "   - Click 'Users' → 'Create user'"
-        echo ""
-        echo "   Email-based users:"
-        echo "   - User name: user@example.com"
-        echo "   - Email address: user@example.com"
-        echo "   - ✅ Mark email address as verified"
-        echo "   - Set temporary password"
-        echo ""
-        echo "   Username-based users:"
-        echo "   - User name: johndoe (custom username)"
-        echo "   - Email address: user@example.com"
-        echo "   - ✅ Mark email address as verified"
-        echo "   - Set temporary password"
-        echo "   - ⚠️  IMPORTANT: Administrator must login first to set permanent password"
-        echo "   - Only then share credentials with actual user"
-        echo ""
-        echo "   📖 For detailed user creation instructions, see docs/user-management.md"
-        echo ""
-        echo "2. Access Your Application:"
-        if [ -n "${cloudfront_url:-}" ] && [ "$cloudfront_url" != "None" ]; then
-            echo "   - URL: "
-            print_info "  $cloudfront_url"
-        else
-            echo "   - Find the CloudFront URL in CloudFormation Stack Outputs"
-        fi
-        echo "   - Share this URL with your users"
-        echo ""
-    else
+    if ! ${cdk_prefix}cdk deploy --context region="$deploy_region" --app "$app_path" --require-approval never; then
         print_error "Deployment failed. Check the error messages above."
-        print_info "If the error is due to Docker Hub rate limiting. You can retry in a few minutes."
         return 1
     fi
+    print_success "Deployment complete!"
+    echo ""
+
+    cd "$SCRIPT_DIR"
+
+    # Extract CloudFormation stack outputs (retry up to 5 times with 5 second delay)
+    print_info "Extracting deployment outputs..."
+    print_info "Stack name: $current_stack_name"
+    print_info "Region: $deploy_region"
+    local runtime_arn user_pool_id client_id frontend_bucket cloudfront_url cognito_pool_url
+    for i in {1..5}; do
+        cloudfront_url=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CloudFrontURL'].OutputValue" --output text 2>/dev/null || echo "")
+        cognito_pool_url=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolUrl'].OutputValue" --output text 2>/dev/null || echo "")
+        runtime_arn=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text 2>/dev/null || echo "")
+        user_pool_id=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" --output text 2>/dev/null || echo "")
+        client_id=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolClientId'].OutputValue" --output text 2>/dev/null || echo "")
+        frontend_bucket=$(aws cloudformation describe-stacks --stack-name "$current_stack_name" --region "$deploy_region" --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text 2>/dev/null || echo "")
+
+        print_info "Attempt $i: cloudfront_url='$cloudfront_url', cognito_pool_url='$cognito_pool_url'"
+
+        if [ -n "$cloudfront_url" ] && [ -n "$cognito_pool_url" ]; then
+            break
+        fi
+
+        if [ "$i" -lt 5 ]; then
+            sleep 5
+        fi
+    done
+    echo ""
+
+    # Step 7: Build and upload the static frontend (served from S3 via CloudFront)
+    print_header "Step 7: Build & Upload Frontend"
+    if [ -z "$runtime_arn" ] || [ -z "$frontend_bucket" ]; then
+        print_error "Could not read AgentRuntimeArn / FrontendBucketName from stack outputs."
+        return 1
+    fi
+    print_info "Agent Runtime ARN: ${runtime_arn:0:50}..."
+    print_info "Frontend bucket:   $frontend_bucket"
+
+    cd "$SCRIPT_DIR/frontend"
+    print_info "Installing frontend dependencies..."
+    npm ci >/dev/null 2>&1 || npm install
+    print_info "Building frontend..."
+    if ! npm run build; then
+        print_error "Frontend build failed"; return 1
+    fi
+    # Inject runtime config (Cognito + AgentRuntimeArn) into the built app
+    cp runtime-config-cloud.js dist/runtime-config.js
+    AWS_REGION="$deploy_region" \
+        USER_POOL_ID="$user_pool_id" \
+        USER_POOL_CLIENT_ID="$client_id" \
+        AGENT_RUNTIME_ARN="$runtime_arn" \
+        CONFIG_FILE="./dist/runtime-config.js" \
+        ./inject-config.sh
+
+    print_info "Uploading frontend to s3://$frontend_bucket ..."
+    aws s3 sync dist/ "s3://$frontend_bucket/" --delete --region "$deploy_region"
+
+    # Invalidate CloudFront so the new build is served immediately
+    local dist_id
+    dist_id=$(aws cloudfront list-distributions --query "DistributionList.Items[?contains(Comment, 'IRIS - static frontend')].Id" --output text 2>/dev/null | head -n1)
+    if [ -n "$dist_id" ] && [ "$dist_id" != "None" ]; then
+        print_info "Invalidating CloudFront distribution $dist_id ..."
+        aws cloudfront create-invalidation --distribution-id "$dist_id" --paths "/*" >/dev/null 2>&1 || true
+    fi
+    cd "$SCRIPT_DIR"
+    print_success "Frontend deployed"
+    echo ""
+
+    # Post-Deployment Instructions
+    print_header "Post-Deployment Steps"
+    if [ -n "${cloudfront_url:-}" ] && [ "$cloudfront_url" != "None" ]; then
+        echo "✅ Application URL: $cloudfront_url"
+    else
+        echo "⚠️  Application URL: Check CloudFormation Stack Outputs"
+    fi
+    echo ""
+    echo "1. Create Cognito Users:"
+    if [ -n "${cognito_pool_url:-}" ] && [ "$cognito_pool_url" != "None" ]; then
+        echo "   - User Pool Console:"
+        print_info "  $cognito_pool_url"
+    fi
+    echo "   - Go to AWS Console → CloudFormation → Your Stack → Resources"
+    echo "   - Find and click on the Cognito User Pool"
+    echo "   - Click 'Users' → 'Create user'"
+    echo ""
+    echo "   Email-based users:"
+    echo "   - User name: user@yourcompany.com"
+    echo "   - Email address: user@yourcompany.com"
+    echo "   - ✅ Mark email address as verified"
+    echo "   - Set temporary password"
+    echo ""
+    echo "   Username-based users:"
+    echo "   - User name: johndoe (custom username)"
+    echo "   - Email address: john.doe@yourcompany.com"
+    echo "   - ✅ Mark email address as verified"
+    echo "   - Set temporary password"
+    echo "   - ⚠️  IMPORTANT: Administrator must login first to set permanent password"
+    echo "   - Only then share credentials with actual user"
+    echo ""
+    echo "   📖 For detailed user creation instructions, see docs/user-management.md"
+    echo ""
+    echo "2. Access Your Application:"
+    if [ -n "${cloudfront_url:-}" ] && [ "$cloudfront_url" != "None" ]; then
+        echo "   - URL: "
+        print_info "  $cloudfront_url"
+    else
+        echo "   - Find the CloudFront URL in CloudFormation Stack Outputs"
+    fi
+    echo "   - Share this URL with your users"
+    echo ""
 
     cd "$SCRIPT_DIR"
 }
@@ -1736,7 +1767,7 @@ show_main_menu() {
         echo "1. Local Testing (No Docker)"
         echo "2. Local Testing (Docker - Local Artifacts)"
         echo "3. Local Testing (Docker - S3 Artifacts)"
-        echo "4. Cloud Deployment (Docker)"
+        echo "4. Cloud Deployment (AgentCore Runtime - serverless)"
         echo "5. MCP Server Deployment (Cline, Kiro and Amazon Q)"
         echo "6. Exit "
         echo ""
@@ -1753,7 +1784,7 @@ show_main_menu() {
                 local_test_docker_s3
                 ;;
             4)
-                cloud_deploy_workflow
+                cloud_deploy_agentcore
                 ;;
             5)
                 setup_mcp_server

@@ -1,9 +1,15 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-# Use ECR Public Python base image
+#
+# Amazon Bedrock AgentCore Runtime image for IRIS.
+#
+# Same build as backend/Dockerfile (bakes in the codebase + pre-generated
+# representation), but runs the AgentCore Runtime entrypoint (agent_runtime.py)
+# on port 8080 instead of the WebSocket server on 8000. AgentCore Runtime
+# requires ARM64 images — build with `--platform linux/arm64` (the CDK
+# AgentRuntimeArtifact.from_asset(platform=LINUX_ARM64) does this via buildx).
 FROM public.ecr.aws/docker/library/python:3.13-slim-bookworm
 
-# Install uv
 RUN pip install uv
 
 WORKDIR /app
@@ -11,9 +17,6 @@ WORKDIR /app
 # Copy entire project
 COPY . ./iris
 RUN rm -rf ./iris/.venv
-
-# Debug: List what was copied
-RUN ls -la /app/iris/
 
 # Create output directory
 RUN mkdir -p /app/output
@@ -31,7 +34,6 @@ target_dir = f'/app/codebase_data/codebase/{codebase_name}'; \
 os.makedirs(target_dir, exist_ok=True); \
 zipfile.ZipFile(zip_path).extractall(target_dir) \
 " {} \; -exec rm {} \; || echo "No codebase zip files found"
-RUN echo "Successfully extracted codebase to /app/codebase_data/codebase/"
 
 # Extract representation zip from codebase_representation/ directory
 RUN find /app/iris/codebase_data/codebase_representation/ -name "*_representation.zip" -exec python -c "\
@@ -43,16 +45,11 @@ target_dir = f'/app/codebase_data/output/{codebase_name}'; \
 os.makedirs(target_dir, exist_ok=True); \
 zipfile.ZipFile(zip_path).extractall(target_dir) \
 " {} \; -exec rm {} \; || echo "No representation zip files found"
-RUN echo "Successfully extracted representation to /app/codebase_data/output/"
 
-# Change to iris directory for dependency installation
 WORKDIR /app/iris
 
-# Delete config.yaml and rename config_docker.yaml to config.yaml
+# Use the Docker config
 RUN rm -f config.yaml && mv config_docker.yaml config.yaml
-
-# Debug: Verify the config replacement worked
-RUN echo "=== CONFIG AFTER REPLACEMENT ===" && head -10 config.yaml
 
 # Install system dependencies and upgrade all packages for security
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
@@ -61,7 +58,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install and upgrade specific vulnerable packages to advisory versions to avoid CVE errors
 RUN apt-get update && apt-get install -y \
     libpam-modules \
     libpam0g \
@@ -75,10 +71,6 @@ RUN apt-get update && apt-get install -y \
     libgnutls30 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Verify installed versions for security compliance
-RUN echo "=== SECURITY PACKAGE VERSIONS ===" && \
-    dpkg -l | grep -E "(libpam|libglib2.0|gnupg|libxml2|gnutls)" | awk '{print $2, $3}'
 
 # Install dependencies using uv with increased timeout
 ENV UV_HTTP_TIMEOUT=300
@@ -95,15 +87,14 @@ USER appuser
 # Set environment variables
 ENV PYTHONPATH=/app/iris
 ENV PYTHONUNBUFFERED=1
-ENV DOCKER_ENV=true
+ENV DOCKER_CONTAINER=true
 
-# Expose port
-EXPOSE 8000
+# AgentCore Runtime HTTP protocol contract: POST /invocations + GET /ping on 8080
+EXPOSE 8080
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8080/ping || exit 1
 
-# Run the WebSocket server from the backend directory
+# Run the AgentCore Runtime entrypoint
 WORKDIR /app/iris/backend
-CMD ["uv", "run", "python", "websocket_server.py"]
+CMD ["uv", "run", "python", "agent_runtime.py"]

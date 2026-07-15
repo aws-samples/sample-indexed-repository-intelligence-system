@@ -1,0 +1,22 @@
+# Root build-context excludes for backend image builds.
+#
+# The backend build context is the PROJECT ROOT (docker-compose.yml
+# `context: ..` and infra/stack.py `from_asset("../")`), and the backend
+# Dockerfiles do `COPY . ./iris`, so without this file the entire tree —
+# including .venv/ and venv/ (~1.7GB) — is shipped into the daemon.
+#
+# This list mirrors the CDK asset `exclude` in infra/stack.py so local
+# (docker-compose) builds and the CDK/AgentCore build stay consistent.
+# Do NOT add codebase_artifacts/ or config_docker.yaml here — the non-S3
+# backend image copies codebase_artifacts/ and every image renames
+# config_docker.yaml to config.yaml at build time.
+**/.venv
+**/venv
+**/__pycache__
+**/cdk.out
+infra/cdk.out
+**/.git
+**/node_modules
+**/*.pyc
+**/.DS_Store
+*.log

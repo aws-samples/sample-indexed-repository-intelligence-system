@@ -21,14 +21,14 @@
 
 ## Executive Summary
 
-IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to Amazon S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a real-time WebSocket-based chat interface for querying code. The system uses a React frontend served via Amazon CloudFront, a FastAPI WebSocket backend on Amazon ECS on AWS Fargate, Amazon Cognito for authentication, Amazon S3 for codebase storage, and Amazon DynamoDB for optional conversation logging. It also exposes an MCP server for IDE integration.
+IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to Amazon S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a chat interface for querying code. The system uses a React frontend served via Amazon CloudFront from a private Amazon S3 bucket, an Amazon Bedrock AgentCore Runtime backend, Amazon Cognito for authentication, and Amazon S3 for codebase storage. It also exposes an MCP server for IDE integration.
 
 ### Key Statistics
 
-- **Total Threats**: 13
-- **Total Mitigations**: 10
+- **Total Threats**: 11
+- **Total Mitigations**: 9
 - **Total Assumptions**: 4
-- **System Components**: 10
+- **System Components**: 8
 - **Assets**: 13
 - **Threat Actors**: 13
 
@@ -36,23 +36,21 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 | #   | Threat                                                         | Severity | Mitigation                                                                                                                                                   |
 | --- | -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| T1  | Auth bypass when Cognito is not configured (local/Docker only) | Low      | CDK enforces Cognito in cloud deployments; only affects local dev. **POC accepted risk.**                                                                    |
-| T2  | Prompt injection via agentic framework                         | Critical | ✅ Partially mitigated: Amazon Bedrock Guardrails + trust-hierarchy markers in system prompts (`[BEGIN/END UNTRUSTED FILE DATA]`) + file allowlist filtering |
-| T3  | Direct S3 bucket access via misconfigured policies             | Critical | Block public access, restrict to ECS task role, VPC endpoint policies                                                                                        |
-| T4  | HTTP interception between CloudFront and ALB                   | Medium   | Relies on AWS Nitro System physical encryption                                                                                                               |
-| T5  | XSS via unsafe-inline/unsafe-eval CSP                          | High     | ✅ Fixed: removed `rehype-raw`, DOMPurify sanitization added                                                                                                 |
-| T6  | JWT token replay / session hijacking                           | High     | ✅ Mitigated: JWKS TTL cache with proactive refresh, monotonic session TTL (1h), session cap (100 max)                                                       |
-| T7  | ECS task role credential theft                                 | Critical | ✅ Fixed: Amazon Bedrock IAM scoped to inference profiles + foundation model ARNs; Guardrail permission scoped to specific ARN                               |
-| T8  | Log injection / repudiation                                    | Medium   | Partially mitigated by existing `sanitize_for_log`. **POC accepted risk.**                                                                                   |
-| T9  | MCP server path traversal                                      | Medium   | ✅ Fixed: path containment check (`resolve().relative_to()`) in `read_multiple_files`; MCP command allowlist (deferred)                                      |
-| T10 | WebSocket DoS / Amazon Bedrock cost escalation                 | High     | ✅ Fixed: token-bucket rate limiter (10 msg/min), session cap (100), 64KB message size limit                                                                 |
-| T11 | Missing RBAC / cross-tenant access                             | High     | **POC accepted risk** — single-tenant deployment assumed. Multi-tenant RBAC deferred.                                                                        |
-| T12 | Amazon DynamoDB conversation data exposure                     | Medium   | CMK encryption optional; conversation history file permissions restricted to owner (0o600). **POC accepted risk.**                                           |
-| T13 | Supply chain dependency compromise                             | High     | pip-audit in CI/CD, pinned deps with hashes, Dependabot                                                                                                      |
+| T1  | Auth bypass when Cognito is not configured (local/Docker only) | Low      | Managed Cognito JWT authorizer is enforced in cloud deployments; only affects local dev. **POC accepted risk.**                                              |
+| T2  | Prompt injection via agentic framework                         | Critical | ✅ Partially mitigated: Amazon Bedrock Guardrails + trust markers wrapping untrusted file content in system prompts + file allowlist filtering                |
+| T3  | Direct S3 bucket access via misconfigured policies             | Critical | Block public access, read-only scoped execution role, `enforce_ssl`                                                                                          |
+| T4  | XSS via unsafe-inline/unsafe-eval CSP                          | High     | ✅ Fixed: removed `rehype-raw`, DOMPurify sanitization added                                                                                                  |
+| T5  | JWT token replay / session impersonation                       | High     | ✅ Mitigated: managed Cognito authorizer validates issuer/signature/expiry on every invocation; short-lived access tokens                                     |
+| T6  | AgentCore execution-role abuse via agent-code compromise       | High     | ✅ Fixed: Amazon Bedrock IAM scoped to inference profiles + foundation model ARNs; guardrail permission scoped to a specific ARN; managed microVM isolation   |
+| T7  | Log injection / repudiation                                    | Medium   | Partially mitigated by existing `sanitize_for_log`. **POC accepted risk.**                                                                                   |
+| T8  | MCP server path traversal                                      | Medium   | ✅ Fixed: path containment check (`resolve().relative_to()`) in `read_multiple_files`; MCP command allowlist (deferred)                                       |
+| T9  | Invocation flooding / Amazon Bedrock cost escalation           | High     | Per-session microVM isolation + managed authorizer gate access; Amazon Bedrock quotas + cost budgets. No app-level rate limiter — WAF rate rules recommended. |
+| T10 | Missing RBAC / cross-tenant access                             | High     | **POC accepted risk** — single-tenant deployment assumed. Multi-tenant RBAC deferred.                                                                        |
+| T11 | Supply chain dependency compromise                             | High     | pip-audit in CI/CD, pinned deps with hashes, Dependabot                                                                                                       |
 
 ## Business Context
 
-**Description**: IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to Amazon S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a real-time WebSocket-based chat interface for querying code. The system uses a React frontend served via Amazon CloudFront, a FastAPI WebSocket backend on Amazon ECS on AWS Fargate, Amazon Cognito for authentication, Amazon S3 for codebase storage, and Amazon DynamoDB for optional conversation logging. It also exposes an MCP server for IDE integration.
+**Description**: IRIS is a cloud-native AI-powered code analysis and chat application built on AWS. It allows users to upload codebases to Amazon S3, generates summaries and context using Amazon Bedrock LLMs (Claude models), and provides a chat interface for querying code. The system uses a React frontend served via Amazon CloudFront from a private Amazon S3 bucket, an Amazon Bedrock AgentCore Runtime backend, Amazon Cognito for authentication, and Amazon S3 for codebase storage. It also exposes an MCP server for IDE integration.
 
 ### Business Features
 
@@ -71,40 +69,38 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 ### Components
 
-| ID   | Name                               | Type     | Service Provider | Description                                                                                                                                                                                                                                            |
-| ---- | ---------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| C001 | React Frontend                     | Compute  | AWS              | React 18+ TypeScript SPA served via CloudFront CDN with S3 origin. Handles real-time WebSocket communication, client-side routing, and state management.                                                                                               |
-| C002 | Application Load Balancer          | Network  | AWS              | Application Load Balancer providing SSL termination, WebSocket support, and routing to Amazon ECS on AWS Fargate tasks. Ingress restricted to Amazon CloudFront prefix list on port 80.                                                                |
-| C003 | FastAPI WebSocket Server           | Compute  | AWS              | FastAPI backend running on Amazon ECS on AWS Fargate in private subnets. Handles WebSocket connections, session management, JWT authentication via Amazon Cognito, and orchestrates AI agent interactions. Runs as non-root user in container.         |
-| C004 | Amazon Bedrock                     | Compute  | AWS              | Amazon Bedrock LLM service providing Claude model inference. Used for code analysis, summarization, and agentic chat. Supports prompt caching and streaming responses. Accessed via IAM task role.                                                     |
-| C005 | Amazon S3 Codebase Bucket          | Storage  | AWS              | Customer-owned Amazon S3 bucket storing codebase artifacts and analysis outputs. SSE-S3 encryption enforced, optional CMK support. Accessed by Amazon ECS tasks via VPC endpoint.                                                                      |
-| C006 | Amazon DynamoDB Conversation Store | Storage  | AWS              | Optional Amazon DynamoDB table for persisting conversation history. Async logging to avoid blocking agent. Messages truncated at 8.5KB. Encrypted with AWS-owned keys by default.                                                                      |
-| C007 | VPC Network                        | Network  | AWS              | Amazon VPC (10.0.0.0/16) with public subnets (Application Load Balancer) and private subnets (Amazon ECS) across 2 AZs. NAT Gateway for outbound. VPC endpoints for Amazon S3, Amazon Bedrock, Amazon CloudWatch, Amazon ECR. Port 25 blocked.         |
-| C008 | Amazon Cognito                     | Security | AWS              | Amazon Cognito User Pool providing JWT-based authentication (RS256). Issues access and ID tokens. Self-signup disabled by default. JWKS endpoint used for token verification.                                                                          |
-| C009 | Amazon CloudWatch Logs             | Other    | AWS              | Amazon CloudWatch Logs for application events, errors, authentication logs. Application Load Balancer and Amazon CloudFront access logs stored in Amazon S3. VPC Flow Logs for network traffic. Default 7-day retention, configurable up to 3650 days. |
-| C010 | MCP Server                         | Compute  | Other            | Local MCP server exposing codebase_context and codebase_query tools for IDE integration. Runs as a local process, communicates via stdio. Provides path validation and configurable tool enablement.                                                   |
+| ID   | Name                             | Type     | Service Provider | Description                                                                                                                                                                                                                                             |
+| ---- | -------------------------------- | -------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C001 | React Frontend                   | Compute  | AWS              | React (Vite) SPA served as static assets from a private Amazon S3 bucket via Amazon CloudFront (Origin Access Control). Handles client-side routing and state; invokes the AgentCore Runtime data-plane endpoint directly over HTTPS with SSE responses. |
+| C002 | Amazon CloudFront                | Network  | AWS              | CDN delivering the static React app from the private Amazon S3 origin via Origin Access Control. Enforces HTTPS (REDIRECT_TO_HTTPS), TLS 1.2 (2021 policy), the managed `SECURITY_HEADERS` response-headers policy, and SPA routing (403/404 → /index.html). |
+| C003 | Amazon Bedrock AgentCore Runtime | Compute  | AWS              | Serverless managed runtime hosting the IRIS agent (`backend/agent_runtime.py`; HTTP protocol: `POST /invocations` with SSE + `GET /ping`). Each `runtimeSessionId` runs in an isolated microVM (ARM64, non-root). A built-in Amazon Cognito JWT authorizer validates the bearer token before requests reach the container. `networkMode` PUBLIC. |
+| C004 | Amazon Bedrock                   | Compute  | AWS              | Amazon Bedrock LLM service providing Claude (Haiku and Sonnet) inference. Used for code analysis, summarization, and agentic chat. Supports prompt caching and streaming responses. Accessed via the AgentCore execution role.                          |
+| C005 | Amazon S3 Codebase Bucket        | Storage  | AWS              | External, customer-owned Amazon S3 bucket storing codebase artifacts and analysis outputs. SSE-S3 encryption enforced, optional CMK. Accessed read-only by the AgentCore execution role.                                                               |
+| C006 | Amazon Cognito                   | Security | AWS              | Amazon Cognito User Pool + User Pool Client providing JWT-based authentication (RS256). Issues access and ID tokens; the frontend sends the access token. The AgentCore Runtime authorizer validates tokens against the pool's OIDC discovery URL (`allowedClients` = app client id). Self-signup disabled by default. |
+| C007 | Amazon CloudWatch Logs           | Other    | AWS              | Amazon CloudWatch Logs for Runtime application events and errors (`/aws/bedrock-agentcore/runtimes/*`), plus Amazon CloudFront access logs and Amazon S3 server access logs stored in Amazon S3, and AWS X-Ray traces. Default 7-day retention, configurable. |
+| C008 | MCP Server                       | Compute  | Other            | Local MCP server exposing codebase_context and codebase_query tools for IDE integration. Runs as a local process, communicates via stdio. Provides path validation and configurable tool enablement.                                                    |
 
 ### Connections
 
-| ID    | Source | Destination | Protocol | Port | Encrypted | Description                                                                                                    |
-| ----- | ------ | ----------- | -------- | ---- | --------- | -------------------------------------------------------------------------------------------------------------- |
-| CN001 | C001   | C001        | HTTPS    | 443  | Yes       | Users access React frontend via CloudFront CDN over HTTPS with TLS 1.2+                                        |
-| CN002 | C001   | C002        | HTTP     | 80   | No        | CloudFront routes WebSocket and API traffic to ALB over HTTP on AWS internal network (Nitro System encryption) |
-| CN003 | C002   | C003        | HTTP     | 8000 | No        | ALB forwards traffic to FastAPI WebSocket server on ECS Fargate in private subnets                             |
-| CN004 | C003   | C004        | HTTPS    | 443  | Yes       | FastAPI server invokes Amazon Bedrock models for code analysis, summarization, and chat via VPC endpoint       |
-| CN005 | C003   | C008        | HTTPS    | 443  | Yes       | FastAPI server validates JWT tokens against Amazon Cognito JWKS endpoint                                       |
-| CN006 | C003   | C005        | HTTPS    | 443  | Yes       | FastAPI server reads/writes codebase artifacts from customer Amazon S3 bucket via VPC endpoint                 |
-| CN007 | C003   | C006        | HTTPS    | 443  | Yes       | FastAPI server logs conversation history to Amazon DynamoDB (optional, async)                                  |
-| CN008 | C003   | C009        | HTTPS    | 443  | Yes       | FastAPI server sends application logs to Amazon CloudWatch via VPC endpoint                                    |
+| ID    | Source | Destination | Protocol | Port | Encrypted | Description                                                                                                              |
+| ----- | ------ | ----------- | -------- | ---- | --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| CN001 | C001   | C002        | HTTPS    | 443  | Yes       | Users load the React app from Amazon CloudFront over HTTPS with TLS 1.2+                                                 |
+| CN002 | C001   | C003        | HTTPS    | 443  | Yes       | Browser invokes the AgentCore Runtime data-plane endpoint directly (`POST /invocations`, SSE) with `Authorization: Bearer <Cognito access token>` |
+| CN003 | C001   | C006        | HTTPS    | 443  | Yes       | Browser authenticates with Amazon Cognito (SRP) to obtain JWT tokens                                                    |
+| CN004 | C003   | C006        | HTTPS    | 443  | Yes       | The Runtime's managed authorizer validates the bearer token against Amazon Cognito's OIDC discovery / JWKS endpoint      |
+| CN005 | C003   | C004        | HTTPS    | 443  | Yes       | Agent invokes Amazon Bedrock models for code analysis, summarization, and chat                                          |
+| CN006 | C003   | C005        | HTTPS    | 443  | Yes       | Agent reads codebase artifacts from the external customer Amazon S3 bucket (read-only)                                   |
+| CN007 | C003   | C007        | HTTPS    | 443  | Yes       | Runtime emits application logs and traces to Amazon CloudWatch / AWS X-Ray                                               |
 
 ### Data Stores
 
-| ID   | Name                                 | Type           | Classification | Encrypted at Rest | Description                                                                                                                                                           |
-| ---- | ------------------------------------ | -------------- | -------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D001 | S3 Codebase Artifacts                | Object Storage | Confidential   | Yes               | Customer-owned S3 bucket storing uploaded codebases, analysis artifacts, and codebase representations. SSE-S3 enforced, optional CMK.                                 |
-| D002 | Amazon DynamoDB Conversation History | NoSQL          | Internal       | Yes               | Optional Amazon DynamoDB table storing conversation history between users and AI agents. Messages truncated at 8.5KB. Encrypted with AWS-owned keys by default.       |
-| D003 | In-Memory Session Store              | Other          | Internal       | No                | In-memory session hashmap on ECS Fargate containers. Stores active WebSocket sessions, agent instances, user info, and conversation state. Lost on container restart. |
-| D004 | Local File Cache                     | Other          | Internal       | No                | Local file cache (.iris_cache/) storing file hashes and codebase overview data for performance optimization. Deleted files cleaned automatically.               |
+| ID   | Name                    | Type           | Classification | Encrypted at Rest | Description                                                                                                                                                     |
+| ---- | ----------------------- | -------------- | -------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D001 | S3 Codebase Artifacts   | Object Storage | Confidential   | Yes               | External customer-owned Amazon S3 bucket storing uploaded codebases, analysis artifacts, and codebase representations. SSE-S3 enforced, optional CMK.           |
+| D002 | In-Session Runtime State | Other          | Internal       | N/A               | Per-`runtimeSessionId` state (active agent instance, user info, conversation state) held in the isolated microVM's memory/filesystem. Ephemeral; sanitized on session termination. Not persisted to any datastore. |
+| D003 | Local File Cache        | Other          | Internal       | No                | Local file cache (.iris_cache/) storing file hashes and codebase overview data for performance optimization. Deleted files cleaned automatically.               |
+
+> **Note**: No persistent conversation store is deployed. The stack provisions no Amazon DynamoDB table and no AgentCore Memory resource; a DynamoDB logger and a Memory hook exist in the codebase but are not wired into the deployed stack.
 
 ## Threat Actors
 
@@ -236,7 +232,7 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 - **Resources**: ResourceLevel.MODERATE
 - **Relevant**: Yes
 - **Priority**: 3/10
-- **Description**: External attacker targeting the WebSocket endpoint, CloudFront distribution, or ALB to gain unauthorized access or disrupt service.
+- **Description**: External attacker targeting the Amazon CloudFront distribution or the AgentCore Runtime data-plane endpoint to gain unauthorized access or disrupt service.
 
 ## Trust Boundaries
 
@@ -270,27 +266,27 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 #### External / Internet
 
 - **Trust Level**: TrustLevel.UNTRUSTED
-- **Description**: Public internet where end users access the application via CloudFront HTTPS endpoint
+- **Description**: Public internet where end users access the application via the Amazon CloudFront HTTPS endpoint and invoke the AgentCore Runtime data-plane endpoint
 
-#### DMZ / Edge Layer
+#### Edge Layer
 
 - **Trust Level**: TrustLevel.MEDIUM
-- **Description**: AWS-managed CDN and load balancing layer. CloudFront distribution and ALB in public subnets.
+- **Description**: Amazon CloudFront edge layer serving the static React app from a private Amazon S3 origin via Origin Access Control
 
 #### AWS Managed Services
 
 - **Trust Level**: TrustLevel.HIGH
-- **Description**: AWS managed services accessed via VPC endpoints or IAM roles: Amazon Bedrock, Amazon S3, Amazon DynamoDB, Amazon CloudWatch, Amazon Cognito
+- **Description**: AWS managed services accessed via the AgentCore execution role and the managed authorizer: Amazon Bedrock, Amazon S3, Amazon CloudWatch, Amazon Cognito
 
 #### Local Developer Environment
 
 - **Trust Level**: TrustLevel.MEDIUM
 - **Description**: Local developer machine running MCP server for IDE integration. Communicates via stdio, no network exposure.
 
-#### Application Layer (Private VPC)
+#### Managed Runtime (AgentCore)
 
 - **Trust Level**: TrustLevel.HIGH
-- **Description**: Private VPC subnets containing ECS Fargate tasks running the FastAPI WebSocket server. No direct internet access.
+- **Description**: Amazon Bedrock AgentCore Runtime microVMs hosting the agent. Fully managed by AWS; each session is isolated in its own microVM. No customer-managed VPC or network layer.
 
 ### Trust Boundaries
 
@@ -321,20 +317,20 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 #### Internet to Edge Boundary
 
 - **Type**: BoundaryType.NETWORK
-- **Controls**: CloudFront WAF, HTTPS enforcement, TLS 1.2+, Security headers
-- **Description**: Boundary between public internet and AWS edge layer (CloudFront/ALB). All traffic must be HTTPS.
+- **Controls**: HTTPS enforcement, TLS 1.2+, managed security headers
+- **Description**: Boundary between the public internet and the Amazon CloudFront edge layer. All traffic must be HTTPS. (A Web Application Firewall is out of scope for this proof-of-value; access to the backend is gated by the Cognito authorizer at the Runtime layer.)
 
-#### Edge to Application Boundary
-
-- **Type**: BoundaryType.NETWORK
-- **Controls**: Security groups (ALB-only ingress), Private subnets, No direct internet access
-- **Description**: Boundary between DMZ (ALB in public subnets) and application layer (ECS in private subnets). Security groups restrict access.
-
-#### Application to AWS Services Boundary
+#### Runtime Authorization Boundary
 
 - **Type**: BoundaryType.NETWORK
-- **Controls**: VPC endpoints, IAM task roles, TLS 1.2+, Least privilege policies
-- **Description**: Boundary between application containers and AWS managed services. All access via VPC endpoints and IAM roles.
+- **Controls**: Managed Amazon Cognito JWT authorizer, TLS 1.2+
+- **Description**: Boundary between the public AgentCore data-plane endpoint and the agent microVM. The managed authorizer validates the Cognito bearer token (issuer, RS256 signature, expiry, `allowedClients` against `client_id`) before any request reaches the container.
+
+#### Runtime to AWS Services Boundary
+
+- **Type**: BoundaryType.NETWORK
+- **Controls**: AgentCore execution role, TLS 1.2+, least-privilege policies
+- **Description**: Boundary between the agent microVM and AWS managed services. All access is via the scoped AgentCore execution role over TLS.
 
 ## Assets and Flows
 
@@ -353,21 +349,19 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 | A009 | JWT Authentication Tokens         | AssetType.CREDENTIAL | AssetClassification.CONFIDENTIAL | 5           | 4           | N/A   |
 | A010 | Conversation History              | AssetType.DATA       | AssetClassification.INTERNAL     | 4           | 3           | N/A   |
 | A011 | LLM Prompts and Responses         | AssetType.DATA       | AssetClassification.INTERNAL     | 4           | 3           | N/A   |
-| A012 | IAM Task Role Credentials         | AssetType.CREDENTIAL | AssetClassification.RESTRICTED   | 5           | 5           | N/A   |
+| A012 | AgentCore Execution Role Credentials | AssetType.CREDENTIAL | AssetClassification.RESTRICTED | 5           | 5           | N/A   |
 | A013 | Application Configuration         | AssetType.DATA       | AssetClassification.INTERNAL     | 3           | 2           | N/A   |
 
 ### Asset Flows
 
 | ID   | Asset                             | Source | Destination | Protocol | Encrypted | Risk Level |
 | ---- | --------------------------------- | ------ | ----------- | -------- | --------- | ---------- |
-| F001 | User Credentials                  | C001   | C002        | HTTPS    | Yes       | 4          |
-| F002 | Session Token                     | C002   | C001        | HTTPS    | Yes       | 3          |
-| F003 | Personal Identifiable Information | C003   | C004        | TLS      | Yes       | 3          |
-| F004 | Audit Logs                        | C003   | C005        | TLS      | Yes       | 2          |
+| F001 | User Credentials                  | C001   | C006        | HTTPS    | Yes       | 4          |
+| F002 | JWT Authentication Tokens         | C006   | C001        | HTTPS    | Yes       | 3          |
+| F003 | JWT Authentication Tokens         | C001   | C003        | HTTPS    | Yes       | 5          |
+| F004 | LLM Prompts and Responses         | C003   | C004        | HTTPS    | Yes       | 4          |
 | F005 | Customer Source Code              | C005   | C003        | HTTPS    | Yes       | 4          |
-| F006 | LLM Prompts and Responses         | C003   | C004        | HTTPS    | Yes       | 4          |
-| F007 | JWT Authentication Tokens         | C001   | C003        | HTTPS    | Yes       | 5          |
-| F008 | Conversation History              | C003   | C006        | HTTPS    | Yes       | 3          |
+| F006 | Audit Logs                        | C003   | C007        | HTTPS    | Yes       | 2          |
 
 ## Threats
 
@@ -375,20 +369,20 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 #### T1: An unauthenticated attacker (local/Docker only)
 
-**Statement**: An unauthenticated attacker, when running the system locally or via Docker without Cognito environment variables configured, can access the system without authentication since the backend falls back to anonymous mode. In cloud (CDK) deployments, Cognito is always provisioned and injected into the ECS task, so this threat does not apply to production.
+**Statement**: An unauthenticated attacker, when running the system locally or via Docker without Cognito environment variables configured, can access the system without authentication since the backend falls back to anonymous mode. In cloud (CDK) deployments, Amazon Cognito is always provisioned and the AgentCore Runtime enforces its Cognito JWT authorizer on every invocation, so this threat does not apply to production.
 
-- **Prerequisites**: when running locally or via Docker without Cognito environment variables (USER_POOL_ID, USER_POOL_CLIENT_ID) configured
+- **Prerequisites**: when running locally or via Docker without Cognito configuration (`ALLOW_ANONYMOUS` / `authEnabled === false`)
 - **Action**: access the system without authentication since the backend falls back to anonymous mode, granting default claims (sub: anonymous)
 - **Impact**: complete unauthenticated access to all system features including codebase analysis and chat capabilities (local/dev environment only)
-- **Severity**: Low (production not affected — CDK always provisions Cognito)
+- **Severity**: Low (production not affected — the cloud Runtime always enforces the Cognito authorizer)
 - **Impacted Assets**: A009
 - **Tags**: authentication, misconfiguration, bypass
 
 #### T2: An authenticated user
 
-**Statement**: A An authenticated user with authenticated access to the WebSocket chat interface can craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework, which leads to unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls
+**Statement**: An authenticated user with access to the chat interface can craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework, which leads to unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls.
 
-- **Prerequisites**: with authenticated access to the WebSocket chat interface
+- **Prerequisites**: with authenticated access to the chat interface
 - **Action**: craft malicious prompts to manipulate the LLM agent into revealing system prompts, accessing unauthorized files via the file retrieval agent, or executing unintended tool calls through the agentic framework
 - **Impact**: unauthorized access to customer source code, exfiltration of system prompts, or unintended information disclosure via agent tool calls
 - **Impacted Assets**: A008, A011
@@ -396,7 +390,7 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 #### T3: An insider or external attacker
 
-**Statement**: A An insider or external attacker with access to the AWS account or misconfigured S3 bucket policies can access the S3 codebase artifacts bucket directly, bypassing application-level controls, due to overly permissive bucket policies or IAM permissions, which leads to direct access to all customer source code stored in the S3 bucket, bypassing all application security controls
+**Statement**: An insider or external attacker with access to the AWS account or misconfigured S3 bucket policies can access the S3 codebase artifacts bucket directly, bypassing application-level controls, due to overly permissive bucket policies or IAM permissions, which leads to direct access to all customer source code stored in the S3 bucket, bypassing all application security controls.
 
 - **Prerequisites**: with access to the AWS account or misconfigured S3 bucket policies
 - **Action**: access the S3 codebase artifacts bucket directly, bypassing application-level controls, due to overly permissive bucket policies or IAM permissions
@@ -404,56 +398,47 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 - **Impacted Assets**: A008
 - **Tags**: S3, data-exposure, misconfiguration
 
-#### T4: An attacker with access to AWS internal network
+#### T4: An attacker
 
-**Statement**: A An attacker with access to AWS internal network with ability to intercept traffic between CloudFront and ALB can intercept unencrypted HTTP traffic between CloudFront and ALB (which uses HTTP over AWS internal network) to capture JWT tokens, user queries, or code analysis results, which leads to exposure of authentication tokens, user queries containing sensitive code context, and AI-generated responses
-
-- **Prerequisites**: with ability to intercept traffic between CloudFront and ALB
-- **Action**: intercept unencrypted HTTP traffic between CloudFront and ALB (which uses HTTP over AWS internal network) to capture JWT tokens, user queries, or code analysis results
-- **Impact**: exposure of authentication tokens, user queries containing sensitive code context, and AI-generated responses
-- **Tags**: TLS, encryption-in-transit, internal-network
-
-#### T5: An attacker
-
-**Statement**: A An attacker with ability to exploit unsafe-inline and unsafe-eval CSP directives in the frontend can inject malicious JavaScript via the chat interface that executes in other users' browsers, leveraging the CSP's unsafe-inline and unsafe-eval directives, which leads to theft of JWT tokens, session hijacking, or manipulation of the chat interface to display misleading AI responses
+**Statement**: An attacker with the ability to exploit unsafe-inline and unsafe-eval CSP directives in the frontend can inject malicious JavaScript via the chat interface that executes in other users' browsers, leveraging the CSP's unsafe-inline and unsafe-eval directives, which leads to theft of JWT tokens, session hijacking, or manipulation of the chat interface to display misleading AI responses.
 
 - **Prerequisites**: with ability to exploit unsafe-inline and unsafe-eval CSP directives in the frontend
 - **Action**: inject malicious JavaScript via the chat interface that executes in other users' browsers, leveraging the CSP's unsafe-inline and unsafe-eval directives
 - **Impact**: theft of JWT tokens, session hijacking, or manipulation of the chat interface to display misleading AI responses
 - **Tags**: XSS, CSP, frontend
 
-#### T6: An external attacker
+#### T5: An external attacker
 
-**Statement**: A An external attacker with access to a stolen or leaked JWT token can replay the JWT token to establish a WebSocket connection and impersonate the legitimate user's session, which leads to full access to the impersonated user's session, including their codebase analysis results and conversation history
+**Statement**: An external attacker with access to a stolen or leaked JWT token can replay the token to invoke the AgentCore Runtime and impersonate the legitimate user's session, which leads to full access to the impersonated user's session, including their codebase analysis results and conversation history.
 
 - **Prerequisites**: with access to a stolen or leaked JWT token
-- **Action**: replay the JWT token to establish a WebSocket connection and impersonate the legitimate user's session
+- **Action**: replay the token to invoke the AgentCore Runtime and impersonate the legitimate user's session
 - **Impact**: full access to the impersonated user's session, including their codebase analysis results and conversation history
 - **Impacted Assets**: A009
-- **Tags**: session-hijacking, JWT, WebSocket
+- **Tags**: session-hijacking, JWT, token-replay
 
-#### T7: An attacker
+#### T6: An attacker
 
-**Statement**: A An attacker with code execution inside the Amazon ECS container (e.g., via container escape or supply chain attack) can access the ECS task role credentials from the container metadata service to gain direct access to Amazon Bedrock, Amazon S3, Amazon DynamoDB, and AWS KMS, which leads to full access to all AWS services the task role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation
+**Statement**: An attacker with code execution inside the agent container (e.g., via a supply chain attack) can access the Amazon Bedrock AgentCore Runtime execution role credentials to gain access to Amazon Bedrock, Amazon S3, and AWS KMS, which leads to full access to all AWS services the execution role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation.
 
-- **Prerequisites**: with code execution inside the Amazon ECS container (e.g., via container escape or supply chain attack)
-- **Action**: access the ECS task role credentials from the container metadata service to gain direct access to Amazon Bedrock, Amazon S3, Amazon DynamoDB, and AWS KMS
-- **Impact**: full access to all AWS services the task role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation
+- **Prerequisites**: with code execution inside the agent container (e.g., via a supply chain attack). The AgentCore microVM is managed and isolated (no customer-managed instance metadata service), which removes the EC2/ECS IMDS credential-theft vector; however, the scoped execution-role credentials remain a concern on code compromise.
+- **Action**: access the AgentCore Runtime execution role credentials to gain access to Amazon Bedrock, Amazon S3, and AWS KMS
+- **Impact**: full access to all AWS services the execution role can access, including customer source code in Amazon S3 and Amazon Bedrock model invocation
 - **Impacted Assets**: A012
-- **Tags**: IAM, credential-theft, container
+- **Tags**: IAM, credential-theft, agent-runtime
 
-#### T8: A malicious user
+#### T7: A malicious user
 
-**Statement**: A A malicious user with authenticated access to the system can inject crafted input to create misleading log entries or deny performing actions when audit trails are insufficient, which leads to inability to attribute malicious actions to specific users, corrupted audit trails, or false log entries that mislead incident response
+**Statement**: A malicious user with authenticated access to the system can inject crafted input to create misleading log entries or deny performing actions when audit trails are insufficient, which leads to inability to attribute malicious actions to specific users, corrupted audit trails, or false log entries that mislead incident response.
 
 - **Prerequisites**: with authenticated access to the system
 - **Action**: inject crafted input to create misleading log entries or deny performing actions when audit trails are insufficient
 - **Impact**: inability to attribute malicious actions to specific users, corrupted audit trails, or false log entries that mislead incident response
 - **Tags**: logging, log-injection, audit
 
-#### T9: A malicious IDE plugin or compromised MCP client
+#### T8: A malicious IDE plugin or compromised MCP client
 
-**Statement**: A A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope
+**Statement**: A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope.
 
 - **Prerequisites**: with access to the local developer machine running the MCP server
 - **Action**: exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal
@@ -461,18 +446,18 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 - **Impacted Assets**: A008
 - **Tags**: MCP, local, file-access
 
-#### T10: An external attacker
+#### T9: An external attacker
 
-**Statement**: A An external attacker with network access to the Amazon CloudFront endpoint can open many concurrent WebSocket connections to exhaust Amazon ECS on AWS Fargate container memory (in-memory session store) or trigger excessive Amazon Bedrock API calls, causing resource exhaustion or cost escalation, which leads to service unavailability for legitimate users, excessive AWS costs from Amazon Bedrock API abuse, or container OOM crashes
+**Statement**: An external attacker with authenticated access to the AgentCore Runtime endpoint can open many concurrent sessions or send high-volume invocations to trigger excessive Amazon Bedrock API calls, causing cost escalation, which leads to excessive AWS costs from Amazon Bedrock API abuse, or throttling that degrades service for legitimate users.
 
-- **Prerequisites**: with network access to the Amazon CloudFront endpoint
-- **Action**: open many concurrent WebSocket connections to exhaust Amazon ECS on AWS Fargate container memory (in-memory session store) or trigger excessive Amazon Bedrock API calls, causing resource exhaustion or cost escalation
-- **Impact**: service unavailability for legitimate users, excessive AWS costs from Amazon Bedrock API abuse, or container OOM crashes
-- **Tags**: DoS, WebSocket, resource-exhaustion
+- **Prerequisites**: with authenticated access to the AgentCore Runtime endpoint
+- **Action**: open many concurrent sessions or send high-volume invocations to trigger excessive Amazon Bedrock API calls, causing cost escalation
+- **Impact**: excessive AWS costs from Amazon Bedrock API abuse, or throttling that degrades service for legitimate users
+- **Tags**: DoS, cost, resource-exhaustion
 
-#### T11: A malicious authenticated user
+#### T10: A malicious authenticated user
 
-**Statement**: A A malicious authenticated user with valid authentication credentials can access codebases and conversation histories belonging to other users since no role-based access control or resource-level authorization exists, which leads to unauthorized access to other users' proprietary source code and conversation data, violating data isolation in multi-tenant deployments
+**Statement**: A malicious authenticated user with valid authentication credentials can access codebases and conversation histories belonging to other users since no role-based access control or resource-level authorization exists, which leads to unauthorized access to other users' proprietary source code and conversation data, violating data isolation in multi-tenant deployments.
 
 - **Prerequisites**: with valid authentication credentials
 - **Action**: access codebases and conversation histories belonging to other users since no role-based access control or resource-level authorization exists
@@ -480,68 +465,54 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 - **Impacted Assets**: A008, A010
 - **Tags**: authorization, RBAC, multi-tenant
 
-#### T12: An insider with Amazon DynamoDB read access
+#### T11: A supply chain attacker
 
-**Statement**: A An insider with Amazon DynamoDB read access when Amazon DynamoDB conversation logging is enabled without CMK encryption can access conversation history stored in Amazon DynamoDB which may contain sensitive code snippets, proprietary logic, or security-relevant information discussed in chat, which leads to exposure of sensitive conversation data including code snippets, architectural details, and security discussions
+**Statement**: A supply chain attacker, when third-party Python packages are installed in the container image, can compromise a third-party dependency (e.g., via typosquatting or package takeover) to inject malicious code into the container, gaining access to customer data and AWS credentials, which leads to full compromise of the agent container, access to customer source code, IAM credentials, and the ability to exfiltrate data.
 
-- **Prerequisites**: when Amazon DynamoDB conversation logging is enabled without CMK encryption
-- **Action**: access conversation history stored in Amazon DynamoDB which may contain sensitive code snippets, proprietary logic, or security-relevant information discussed in chat
-- **Impact**: exposure of sensitive conversation data including code snippets, architectural details, and security discussions
-- **Impacted Assets**: A010
-- **Tags**: DynamoDB, encryption, conversation-history
-
-#### T13: A supply chain attacker
-
-**Statement**: A A supply chain attacker when third-party Python packages are installed in the Docker image can compromise a third-party dependency (e.g., via typosquatting or package takeover) to inject malicious code into the container, gaining access to customer data and AWS credentials, which leads to full compromise of the application container, access to customer source code, IAM credentials, and ability to exfiltrate data
-
-- **Prerequisites**: when third-party Python packages are installed in the Docker image
+- **Prerequisites**: when third-party Python packages are installed in the container image
 - **Action**: compromise a third-party dependency (e.g., via typosquatting or package takeover) to inject malicious code into the container, gaining access to customer data and AWS credentials
-- **Impact**: full compromise of the application container, access to customer source code, IAM credentials, and ability to exfiltrate data
+- **Impact**: full compromise of the agent container, access to customer source code, IAM credentials, and ability to exfiltrate data
 - **Tags**: supply-chain, dependency, container
 
 ## Mitigations
 
 ### Identified Mitigations
 
-#### M1: Enforce Amazon Cognito configuration as mandatory in production deployments. Add startup validation that fails fast if USER_POOL_ID and USER_POOL_CLIENT_ID are not set. Remove the anonymous fallback behavior.
+#### M1: Enforce Amazon Cognito configuration as mandatory in production deployments. The cloud Runtime always enforces its managed Cognito authorizer; the anonymous fallback exists only for local development.
 
 **Addresses Threats**: T1
 
-#### M2: Implement prompt injection detection and prevention. Add input sanitization for user queries before sending to Amazon Bedrock. Use system prompt hardening techniques and output validation to prevent LLM manipulation.
+#### M2: Implement prompt injection detection and prevention. Add input sanitization for user queries before sending to Amazon Bedrock. Use system prompt hardening techniques (wrapping untrusted file content in explicit markers) and output validation to prevent LLM manipulation.
 
 **Addresses Threats**: T2
 
 #### M3: Implement role-based access control (RBAC) to restrict user access to specific codebases. Add resource-level authorization checks that validate user permissions before granting access to codebase data.
 
-**Addresses Threats**: T11
-
-#### M4: Implement WebSocket connection rate limiting and per-user session limits. Add Amazon Bedrock API call budgets and throttling to prevent cost escalation from abuse.
-
 **Addresses Threats**: T10
+
+#### M4: Implement per-session invocation rate limiting and per-user session limits. Add Amazon Bedrock API call budgets and throttling to prevent cost escalation from abuse. Consider WAF rate-based rules and Amazon Bedrock quota/budget alarms.
+
+**Addresses Threats**: T9
 
 #### M5: Tighten Content Security Policy by removing unsafe-inline and unsafe-eval directives. Use nonce-based CSP for inline scripts. Implement output encoding for all AI-generated content rendered in the frontend.
 
-**Addresses Threats**: T5
+**Addresses Threats**: T4
 
-#### M6: Enable Customer Managed Keys (CMK) for Amazon DynamoDB encryption when conversation logging is enabled. Implement data retention policies and automatic purging of old conversation data.
-
-**Addresses Threats**: T12
-
-#### M7: Implement Amazon S3 bucket policy best practices: block public access, enforce encryption, restrict access to specific IAM roles, enable versioning and access logging. Use VPC endpoint policies to restrict Amazon S3 access.
+#### M6: Implement Amazon S3 bucket policy best practices: block public access, enforce encryption, restrict access to specific IAM roles (read-only for the codebase bucket), enable versioning and access logging.
 
 **Addresses Threats**: T3
 
-#### M8: Implement dependency scanning in CI/CD pipeline. Pin dependency versions. Use private package registry. Regularly audit and update dependencies for known vulnerabilities.
+#### M7: Implement dependency scanning in CI/CD pipeline. Pin dependency versions. Use private package registry. Regularly audit and update dependencies for known vulnerabilities.
 
-**Addresses Threats**: T13
+**Addresses Threats**: T11
 
-#### M9: Implement short-lived JWT tokens with automatic refresh. Add token binding to prevent replay attacks. Consider implementing WebSocket-level session tokens that are distinct from authentication tokens.
+#### M8: Implement short-lived JWT access tokens with automatic refresh. Add token binding to prevent replay attacks. The managed Cognito authorizer validates issuer, signature, and expiry on every invocation.
+
+**Addresses Threats**: T5
+
+#### M9: Apply least-privilege IAM policies to the Amazon Bedrock AgentCore Runtime execution role. Separate read and write permissions. Use condition keys to restrict access to specific resources.
 
 **Addresses Threats**: T6
-
-#### M10: Apply least-privilege IAM policies for Amazon ECS task roles. Separate read and write permissions. Use condition keys to restrict access to specific resources. Enable IMDSv2 to protect container metadata.
-
-**Addresses Threats**: T7
 
 ## Assumptions
 
@@ -549,15 +520,15 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 **Description**: Amazon Cognito is properly configured in production deployments with self-signup disabled
 
-- **Impact**: If Amazon Cognito is not configured, the system falls back to anonymous access, exposing all features to unauthenticated users
-- **Rationale**: The code shows authentication is optional - when USER_POOL_ID and USER_POOL_CLIENT_ID are not set, auth is disabled and anonymous access is granted
+- **Impact**: If Amazon Cognito is not configured, local/dev deployments fall back to anonymous access; the cloud Runtime always enforces the managed authorizer
+- **Rationale**: The code shows authentication is optional for local runs — when Cognito is not configured, `ALLOW_ANONYMOUS` / `authEnabled === false` grants anonymous access. Cloud deployments provision Cognito and the Runtime authorizer.
 
 ### A002: Network
 
-**Description**: VPC endpoints are configured for all AWS service access (Amazon S3, Amazon Bedrock, Amazon CloudWatch, Amazon ECR)
+**Description**: The Amazon Bedrock AgentCore Runtime isolates each session in a dedicated microVM and manages network access to AWS services (Amazon S3, Amazon Bedrock, Amazon CloudWatch) on behalf of the agent
 
-- **Impact**: Without VPC endpoints, traffic to AWS services traverses the public internet via NAT Gateway, increasing exposure
-- **Rationale**: Architecture documentation specifies VPC endpoints but CDK deployment may not enforce them
+- **Impact**: The customer does not provision or manage a VPC, subnets, NAT gateways, or VPC endpoints; network isolation and egress are managed by the serverless Runtime
+- **Rationale**: `networkMode` is PUBLIC and the Runtime is fully managed; there is no customer-managed network layer to configure
 
 ### A003: AWS Services
 
@@ -571,7 +542,7 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 **Description**: No role-based access control (RBAC) exists - all authenticated users have equal access to all features and codebases
 
 - **Impact**: Any authenticated user can access any codebase loaded into the system, creating risk of unauthorized data access in multi-tenant scenarios
-- **Rationale**: Code review shows no authorization checks beyond authentication. Session isolation is per-connection, not per-user-permission.
+- **Rationale**: Code review shows no authorization checks beyond authentication. Session isolation is per-session, not per-user-permission.
 
 ## Phase Progress
 
@@ -594,12 +565,12 @@ The following risks are accepted for the POC release and should be addressed bef
 
 | Risk                                         | Severity | Rationale                                                                                      |
 | -------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
-| T1 — Anonymous access in local/dev mode      | Low      | By design for developer experience; CDK deployment always enforces Cognito                     |
-| T8 — Log injection                           | Medium   | `sanitize_for_log` provides partial coverage; full structured logging deferred                 |
-| T11 — No RBAC / multi-tenant isolation       | High     | POC assumes single-tenant (one codebase per deployment); RBAC required before multi-tenant use |
-| T12 — Conversation history plaintext at rest | Medium   | File permissions restricted to owner; encryption-at-rest deferred for POC                      |
+| T1 — Anonymous access in local/dev mode      | Low      | By design for developer experience; the cloud Runtime always enforces the Cognito authorizer   |
+| T7 — Log injection                           | Medium   | `sanitize_for_log` provides partial coverage; full structured logging deferred                 |
+| T9 — Invocation flooding / Bedrock cost      | High     | No app-level rate limiter in the serverless model; WAF rate rules + Bedrock quota/budget alarms recommended |
+| T10 — No RBAC / multi-tenant isolation       | High     | POC assumes single-tenant (one codebase per deployment); RBAC required before multi-tenant use |
 
-All high/critical threats (T2, T5, T6, T7, T9, T10, T13) have been mitigated or significantly reduced prior to open-source release.
+All high/critical threats (T2, T3, T4, T5, T6, T8, T11) have been mitigated or significantly reduced prior to open-source release.
 
 ---
 

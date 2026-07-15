@@ -80,8 +80,8 @@ if command -v docker &> /dev/null; then
     if [ -d "codebase_artifacts" ]; then
         echo "Test 4: Testing Docker builds..."
 
-        echo "  Building backend..."
-        if docker build -f backend/Dockerfile -t test-backend . &> /dev/null; then
+        echo "  Building backend (AgentCore Runtime image)..."
+        if docker build -f backend/Dockerfile.agentcore -t test-backend . &> /dev/null; then
             echo -e "${GREEN}✓ Backend Docker build successful${NC}"
         else
             echo -e "${RED}✗ Backend Docker build failed${NC}"
