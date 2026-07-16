@@ -1,5 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
+import re
 import yaml
 from aws_cdk import (
     Stack,
@@ -73,6 +74,26 @@ class IrisStack(Stack):
         except FileNotFoundError:
             # Default config if file not found
             return {"auth": {"method": "cognito_auth"}}
+
+    def _resolve_runtime_name(self):
+        """Resolve the AgentCore Runtime name for this deployment.
+
+        AgentCore Runtime names are unique per account+region and must match
+        ``[a-zA-Z][a-zA-Z0-9_]{0,47}`` (letters, digits, underscores only — no
+        hyphens). We read ``runtime_name`` from config.yaml (deploy.sh proposes
+        one derived from the stack name, lets the user confirm/change it, and
+        checks availability). If it is unset we fall back to sanitizing the
+        stack name so distinct stacks don't collide on a single hardcoded name.
+        The value is always sanitized so an out-of-spec config can't surface as
+        a cryptic deploy-time error.
+        """
+        raw = self.config.get("runtime_name") or self.stack_name
+        # Replace any disallowed character with an underscore, then ensure the
+        # name starts with a letter and fits the 48-char limit.
+        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+        if not sanitized or not sanitized[0].isalpha():
+            sanitized = f"iris_{sanitized}"
+        return sanitized[:48]
 
     def _create_agentcore_execution_role(self):
         """Create the IAM execution role for the AgentCore Runtime.
@@ -230,7 +251,7 @@ class IrisStack(Stack):
         runtime = agentcore.Runtime(
             self,
             "IrisAgentRuntime",
-            runtime_name="iris_agent",
+            runtime_name=self._resolve_runtime_name(),
             agent_runtime_artifact=artifact,
             execution_role=execution_role,
             environment_variables=environment,

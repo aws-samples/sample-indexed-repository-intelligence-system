@@ -559,6 +559,164 @@ update_app_name() {
     print_success "Updated infra/config.yaml with app_name: $app_name"
 }
 
+# Sanitize an arbitrary string into a valid AgentCore Runtime name.
+# Runtime names must match [a-zA-Z][a-zA-Z0-9_]{0,47} (letters, digits,
+# underscores only; no hyphens; must start with a letter; max 48 chars).
+# Mirrors _resolve_runtime_name() in infra/stack.py so the proposed default
+# matches what CDK would synthesize.
+sanitize_runtime_name() {
+    local raw=$1
+    local sanitized
+    # Replace every disallowed character with an underscore.
+    sanitized=$(printf '%s' "$raw" | sed 's/[^a-zA-Z0-9_]/_/g')
+    # Ensure it starts with a letter.
+    if ! printf '%s' "$sanitized" | grep -q '^[a-zA-Z]'; then
+        sanitized="iris_${sanitized}"
+    fi
+    # Enforce the 48-character limit.
+    printf '%s' "${sanitized:0:48}"
+}
+
+# Read the current runtime_name from infra/config.yaml (may be empty).
+get_runtime_name() {
+    local config_file="$SCRIPT_DIR/infra/config.yaml"
+    [ -f "$config_file" ] || return 0
+    grep "^runtime_name:" "$config_file" | sed 's/^runtime_name: *"\(.*\)".*/\1/' | tr -d '"'
+}
+
+# Persist the chosen runtime name to infra/config.yaml. Adds the key if the
+# config predates this field.
+update_runtime_name() {
+    local runtime_name=$1
+    local config_file="$SCRIPT_DIR/infra/config.yaml"
+
+    if [ ! -f "$config_file" ]; then
+        print_error "infra/config.yaml not found"
+        return 1
+    fi
+
+    if grep -q "^runtime_name:" "$config_file"; then
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s/^runtime_name: \".*\"/runtime_name: \"$runtime_name\"/" "$config_file"
+        else
+            sed -i "s/^runtime_name: \".*\"/runtime_name: \"$runtime_name\"/" "$config_file"
+        fi
+    else
+        # Older config without the field: append it.
+        printf '\nruntime_name: "%s"\n' "$runtime_name" >> "$config_file"
+    fi
+
+    print_success "Updated infra/config.yaml with runtime_name: $runtime_name"
+}
+
+# Check whether an AgentCore Runtime name can be used by the target stack in
+# the given region. Returns 0 (usable) when no runtime with that name exists, or
+# when the only runtime with that name is already owned by the stack we're about
+# to deploy (an in-place update, not a collision). Returns 1 when the name is
+# owned by a different stack or is orphaned. On API/permission errors it warns
+# and treats the name as usable so a missing read permission never hard-blocks a
+# deploy.
+runtime_name_available() {
+    local name=$1
+    local region=$2
+    local stack_name=$3
+    local existing
+    if ! existing=$(aws bedrock-agentcore-control list-agent-runtimes \
+        --region "$region" \
+        --query "agentRuntimes[?agentRuntimeName=='$name'].agentRuntimeName" \
+        --output text 2>/dev/null); then
+        print_warning "Could not check AgentCore Runtime availability (list-agent-runtimes failed). Proceeding without the check." >&2
+        return 0
+    fi
+    if [ -z "$existing" ] || [ "$existing" == "None" ]; then
+        return 0
+    fi
+    # A runtime with this name exists. It's only a problem if it isn't already
+    # owned by the stack we're deploying — otherwise CDK updates it in place.
+    local owned
+    owned=$(aws cloudformation list-stack-resources \
+        --stack-name "$stack_name" \
+        --region "$region" \
+        --query "StackResourceSummaries[?ResourceType=='AWS::BedrockAgentCore::Runtime' && starts_with(PhysicalResourceId, '${name}-')].PhysicalResourceId" \
+        --output text 2>/dev/null || echo "")
+    if [ -n "$owned" ] && [ "$owned" != "None" ]; then
+        print_info "Runtime '$name' is already owned by stack '$stack_name' — will update in place." >&2
+        return 0
+    fi
+    return 1
+}
+
+# Pre-flight check on the target CloudFormation stack's state, warning about
+# cases 'cdk deploy' cannot cleanly update in place. Returns 0 to proceed, 1 to
+# abort. On API/permission errors (or a not-yet-existing stack) it proceeds
+# silently so a first-time deploy is never blocked.
+check_stack_deployable() {
+    local stack_name=$1
+    local region=$2
+    local status
+    status=$(aws cloudformation describe-stacks \
+        --stack-name "$stack_name" \
+        --region "$region" \
+        --query "Stacks[0].StackStatus" \
+        --output text 2>/dev/null || echo "")
+
+    # No stack yet (first deploy) or the status couldn't be read: nothing to warn about.
+    if [ -z "$status" ] || [ "$status" == "None" ]; then
+        return 0
+    fi
+
+    case "$status" in
+        ROLLBACK_COMPLETE)
+            # A failed initial create that rolled back cleanly: the stack is an
+            # empty shell that never had a live resource (a stack that once
+            # succeeded lands in UPDATE_ROLLBACK_COMPLETE instead). CDK will
+            # delete the shell and create it fresh — the expected, non-destructive
+            # move here — so default to proceeding.
+            print_warning "Stack '$stack_name' is in ROLLBACK_COMPLETE (its initial create failed and rolled back)."
+            echo "   No live resources exist. CDK will delete the empty stack and create it fresh."
+            print_prompt "Continue with delete-and-recreate? [Y/n]: "
+            read -r reply
+            reply=${reply:-Y}
+            if [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+                return 0
+            fi
+            print_info "Deployment cancelled. Delete the stack manually if you want a clean recreate:"
+            echo "   aws cloudformation delete-stack --stack-name '$stack_name' --region '$region'"
+            return 1
+            ;;
+        ROLLBACK_FAILED)
+            # A failed initial create whose rollback also failed. continue-update-rollback
+            # does NOT apply here (it only recovers UPDATE_ROLLBACK_FAILED); the only path
+            # forward is to delete the stack and redeploy.
+            print_error "Stack '$stack_name' is in ROLLBACK_FAILED and cannot be updated by 'cdk deploy'."
+            echo "   Its initial create failed and the rollback couldn't complete. Delete it, then re-run this deployment:"
+            echo "       aws cloudformation delete-stack --stack-name '$stack_name' --region '$region'"
+            return 1
+            ;;
+        UPDATE_ROLLBACK_FAILED)
+            # A failed update whose rollback also failed. Recover via continue-update-rollback
+            # (returns it to UPDATE_ROLLBACK_COMPLETE) or, as a last resort, delete and redeploy.
+            print_error "Stack '$stack_name' is in UPDATE_ROLLBACK_FAILED and cannot be updated by 'cdk deploy'."
+            echo "   Recover it first, then re-run this deployment. Options:"
+            echo "   - Continue the rollback (returns it to a working state):"
+            echo "       aws cloudformation continue-update-rollback --stack-name '$stack_name' --region '$region'"
+            echo "   - Or delete the stack and redeploy:"
+            echo "       aws cloudformation delete-stack --stack-name '$stack_name' --region '$region'"
+            return 1
+            ;;
+        *_IN_PROGRESS)
+            # Another stack operation is mid-flight; deploying now will error.
+            print_error "Stack '$stack_name' has an operation in progress ($status)."
+            echo "   Wait for it to finish (or check the CloudFormation console) before deploying."
+            return 1
+            ;;
+        *)
+            # CREATE_COMPLETE, UPDATE_COMPLETE, UPDATE_ROLLBACK_COMPLETE, etc. — deployable in place.
+            return 0
+            ;;
+    esac
+}
+
 # Function to update React app name in runtime config files
 update_react_app_name() {
     local app_name=$1
@@ -1395,6 +1553,57 @@ cloud_deploy_agentcore() {
         esac
     done
     echo ""
+
+    # Step 4c: AgentCore Runtime Name
+    # Runtime names are unique per account+region, so propose a default derived
+    # from the stack name, let the user confirm/change it, and check that the
+    # chosen name isn't already taken before deploying.
+    current_runtime_name=$(get_runtime_name)
+    if [ -z "$current_runtime_name" ]; then
+        current_runtime_name=$(sanitize_runtime_name "$current_stack_name")
+        print_info "No runtime name set; proposing one derived from the stack name: $current_runtime_name"
+    else
+        print_info "Current AgentCore Runtime name: $current_runtime_name"
+    fi
+    while true; do
+        print_prompt "Keep AgentCore Runtime name '$current_runtime_name'? [Y/n]: "
+        read -r reply
+        reply=${reply:-Y}
+        case $reply in
+            [Yy]* )
+                : # keep current_runtime_name; validated below
+                ;;
+            [Nn]* )
+                read -r -p "Enter new AgentCore Runtime name [$current_runtime_name]: " new_runtime_name
+                new_runtime_name=${new_runtime_name:-$current_runtime_name}
+                current_runtime_name=$(sanitize_runtime_name "$new_runtime_name")
+                if [ "$current_runtime_name" != "$new_runtime_name" ]; then
+                    print_info "Adjusted to a valid runtime name (letters/digits/underscores only): $current_runtime_name"
+                fi
+                ;;
+            * )
+                print_error "Please answer y or n."
+                continue
+                ;;
+        esac
+
+        # Availability check: reject a name owned by another runtime/stack.
+        if runtime_name_available "$current_runtime_name" "$deploy_region" "$current_stack_name"; then
+            print_success "Runtime name '$current_runtime_name' is available in $deploy_region"
+            update_runtime_name "$current_runtime_name"
+            break
+        else
+            print_warning "An AgentCore Runtime named '$current_runtime_name' already exists in $deploy_region."
+            echo "   Names are unique per account+region. Choose a different name (or delete the existing runtime/stack first)."
+        fi
+    done
+    echo ""
+
+    # Step 4d: Target stack state pre-flight. Catch un-updatable/destructive
+    # stack states now, before the expensive artifact upload in Step 5.
+    if ! check_stack_deployable "$current_stack_name" "$deploy_region"; then
+        return 1
+    fi
 
     # Step 5: Generate & upload artifacts to S3 (the index the Runtime pulls at boot)
     print_header "Step 5: Generate & Upload Artifacts to S3"
