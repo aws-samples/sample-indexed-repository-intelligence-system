@@ -127,7 +127,7 @@ run_installation() {
     echo "  --skip-validation             - Skip tree validation confirmation"
     echo ""
     print_info "If you need more deployment options with UI besides iris CLI, continue with the menu below."
-    print_info "Otherwise, choose option 6 in the menu to exit."
+    print_info "Otherwise, choose option 7 in the menu to exit."
 }
 
 # Function to setup with uv
@@ -1810,6 +1810,475 @@ cloud_deploy_agentcore() {
 }
 
 
+# Record this IRIS installation where the iris-query skill will look for it.
+#
+# The skill reads ${IRIS_HOME:-$HOME/.iris}/config.json to find an interpreter
+# that can import iris. Writing it here at install time means the skill never has
+# to scan the filesystem — and never wrongly concludes IRIS is missing when a
+# clone simply sits deeper than its search reaches.
+#
+# Best-effort: a failure here must not fail the install, since the skill still
+# has its own discovery path plus --python/IRIS_PYTHON.
+write_iris_home_config() {
+    local venv_python="$1" iris_repo="$2"
+    local config_dir="${IRIS_HOME:-$HOME/.iris}"
+    local config_file="$config_dir/config.json"
+
+    if ! mkdir -p "$config_dir" 2>/dev/null; then
+        print_warning "Could not create $config_dir — the skill will fall back to searching."
+        return 0
+    fi
+
+    # Hand-rolled JSON: jq is not guaranteed, and this is two known-safe
+    # absolute paths, not user-supplied text.
+    if cat > "$config_file" <<EOF 2>/dev/null
+{
+  "version": 1,
+  "python": "$venv_python",
+  "iris_repo": "$iris_repo"
+}
+EOF
+    then
+        print_success "Recorded this IRIS install for the skill: $config_file"
+        print_info "The skill uses this to locate IRIS from any working directory."
+    else
+        print_warning "Could not write $config_file — the skill will fall back to searching."
+    fi
+    return 0
+}
+
+# Install the iris-query Agent Skill into a target repo (Claude Code / Kiro)
+#
+# Ordering is deliberate: the skill is copied BEFORE indexing runs. If indexing
+# fails (credentials, model access), the user still has a working-but-degraded
+# install whose no-cache path explains what is missing. A Bedrock hiccup must
+# not abort the whole option.
+setup_agent_skill() {
+    print_header "Agent Skill Installation (Claude Code, Kiro, Cline)"
+
+    local skill_src="$SCRIPT_DIR/skills/iris-query"
+    if [ ! -f "$skill_src/SKILL.md" ]; then
+        print_error "Skill source not found at $skill_src"
+        return 1
+    fi
+
+    print_info "Installs the 'iris-query' skill so coding assistants answer questions"
+    print_info "from IRIS's precomputed index instead of exploring from scratch."
+    print_info "This is separate from the MCP Server option (option 6) — both can coexist."
+    echo ""
+
+    # Step 1: venv must exist, since indexing needs the iris package.
+    if ! detect_venv; then
+        print_error "Virtual environment not found. Re-run this script and complete installation first."
+        return 1
+    fi
+
+    local venv_python
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+        if [ -d "$SCRIPT_DIR/.venv" ]; then
+            venv_python="$SCRIPT_DIR/.venv/Scripts/python.exe"
+        else
+            venv_python="$SCRIPT_DIR/venv/Scripts/python.exe"
+        fi
+    else
+        if [ -d "$SCRIPT_DIR/.venv" ]; then
+            venv_python="$SCRIPT_DIR/.venv/bin/python"
+        else
+            venv_python="$SCRIPT_DIR/venv/bin/python"
+        fi
+    fi
+    if [ ! -x "$venv_python" ]; then
+        print_error "Virtual environment Python not found at: $venv_python"
+        return 1
+    fi
+
+    # Record the interpreter and this IRIS clone for the skill to find later.
+    # deploy.sh knows both authoritatively; without this the skill has to
+    # rediscover them by scanning the filesystem, which fails outright when the
+    # clone sits deeper than the search reaches.
+    #
+    # Written to $HOME (not into the skill folder) deliberately: the skill folder
+    # is rm -rf'd on upgrade, and project-level copies get committed — an
+    # absolute path in there would travel to teammates' machines where it is
+    # meaningless.
+    write_iris_home_config "$venv_python" "$SCRIPT_DIR"
+
+    # Step 2: configure directories. output_dir should stay the relative
+    # '.iris_cache', which IRIS resolves against codebase_dir — so the cache and
+    # skill travel together inside the target repo and stay correct if the
+    # codebase_dir changes later.
+    print_info "Set the codebase directory to the repo you want indexed."
+    print_info "Keep the output directory as '.iris_cache' (relative) — IRIS resolves"
+    print_info "it against the codebase directory, so the cache lands inside the target"
+    print_info "repo and can be committed alongside the skill."
+    echo ""
+    if ! configure_directories; then
+        print_error "Directory configuration failed."
+        return 1
+    fi
+
+    local codebase_dir output_dir_cfg cache_parent
+    codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' | tr -d '"')
+    if [ -z "$codebase_dir" ] || [ ! -d "$codebase_dir" ]; then
+        print_error "codebase_dir is not set to a valid directory in config.yaml"
+        return 1
+    fi
+    codebase_dir="$(cd "$codebase_dir" && pwd)"
+
+    # Resolve where the cache will actually land, mirroring IRIS's own rule
+    # (utils.py: construct_output_dir) — relative output_dir resolves against
+    # codebase_dir, absolute is used as-is.
+    output_dir_cfg=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //' | tr -d '"')
+    output_dir_cfg=${output_dir_cfg:-.iris_cache}
+    case "$output_dir_cfg" in
+        /*) cache_parent="$output_dir_cfg" ;;
+        *)  cache_parent="$codebase_dir/$output_dir_cfg" ;;
+    esac
+
+    # configure_directories() mkdir's a relative output_dir against the current
+    # working directory (this IRIS clone), not against codebase_dir. Harmless but
+    # confusing: clean up the stray directory when it is empty, and make sure the
+    # real cache parent exists instead.
+    case "$output_dir_cfg" in
+        /*) : ;;
+        *)
+            local stray="$SCRIPT_DIR/$output_dir_cfg"
+            if [ -d "$stray" ] && [ "$stray" != "$cache_parent" ]; then
+                rmdir "$stray" 2>/dev/null && \
+                    print_info "Removed stray empty directory: $stray"
+            fi
+            ;;
+    esac
+    mkdir -p "$cache_parent" 2>/dev/null || true
+
+    print_success "Target repo: $codebase_dir"
+    print_info "Cache location: $cache_parent"
+    if [ "$cache_parent" != "$codebase_dir/.iris_cache" ]; then
+        print_warning "The cache is outside the default <repo>/.iris_cache."
+        print_warning "It will not travel with the repo when teammates clone it."
+    fi
+    echo ""
+
+    # Step 3: copy the skill into the chosen assistant directories.
+    # Copy, never symlink: symlinks break when this IRIS clone moves and cannot
+    # be committed usefully.
+    local -a dest_roots=()
+    local -a dest_labels=()
+
+    local claude_installed=false kiro_installed=false cline_installed=false
+    [ -d "$HOME/.claude" ] && claude_installed=true
+    [ -d "$HOME/.kiro" ] && kiro_installed=true
+    # Cline is a VS Code extension, so detect the extension dir rather than a
+    # dotfile home — ~/.cline only appears once it has written global state.
+    if [ -d "$HOME/.cline" ] || \
+       compgen -G "$HOME/.vscode/extensions/saoudrizwan.claude-dev-*" >/dev/null 2>&1 || \
+       compgen -G "$HOME/.vscode-server/extensions/saoudrizwan.claude-dev-*" >/dev/null 2>&1; then
+        cline_installed=true
+    fi
+
+    local detected=""
+    [ "$claude_installed" = true ] && detected="Claude Code"
+    [ "$kiro_installed" = true ] && detected="${detected:+$detected, }Kiro"
+    [ "$cline_installed" = true ] && detected="${detected:+$detected, }Cline"
+    if [ -n "$detected" ]; then
+        print_success "Detected on this machine: $detected"
+    else
+        print_warning "No supported assistant detected. You can still install for any of them."
+    fi
+    echo ""
+
+    # Scope first. This matters more than it looks: a project-level skill is only
+    # active when the assistant opens IN that repo, but people routinely run
+    # Claude Code from a different directory (a workspace root, another project).
+    # A user-level install is active in every session regardless of directory.
+    echo "Where should the skill be installed?"
+    echo ""
+    echo "  1. User-level  ->  \$HOME/.claude|.kiro|.cline/skills/"
+    echo "     Active in EVERY session, whatever directory the assistant opens."
+    echo "     Pick this if your editor does not open the indexed repo itself."
+    echo ""
+    echo "  2. Project-level  ->  $codebase_dir/.claude|.kiro/skills/"
+    echo "     Commit it so teammates get the skill from 'git clone'."
+    echo "     Only active when the assistant opens THAT repo."
+    echo ""
+    echo "  3. Both (recommended if you are the person indexing)"
+    echo "     You get it everywhere; your team gets it from the repo."
+    echo ""
+    local scope_choice
+    read -r -p "Select [1-3] (default 3): " scope_choice
+    scope_choice=${scope_choice:-3}
+
+    local install_user=false install_project=false
+    case "$scope_choice" in
+        1) install_user=true ;;
+        2) install_project=true ;;
+        3) install_user=true; install_project=true ;;
+        *) print_error "Invalid selection."; return 1 ;;
+    esac
+    echo ""
+
+    echo "Which assistant(s)?"
+    echo "  1. Claude Code"
+    echo "  2. Kiro"
+    echo "  3. Cline"
+    echo "  4. All"
+    echo ""
+    echo "  (comma-separated also works, e.g. '1,3')"
+    echo ""
+    local target_choice
+    read -r -p "Select [1-4] (default 4): " target_choice
+    target_choice=${target_choice:-4}
+
+    local want_claude=false want_kiro=false want_cline=false
+    local piece
+    # Accept a single digit or a comma-separated list, so "1,3" works.
+    IFS=',' read -r -a _picks <<< "$target_choice"
+    for piece in "${_picks[@]}"; do
+        case "$(echo "$piece" | tr -d '[:space:]')" in
+            1) want_claude=true ;;
+            2) want_kiro=true ;;
+            3) want_cline=true ;;
+            4) want_claude=true; want_kiro=true; want_cline=true ;;
+            "") ;;
+            *) print_error "Invalid selection: $piece"; return 1 ;;
+        esac
+    done
+    if [ "$want_claude" = false ] && [ "$want_kiro" = false ] && [ "$want_cline" = false ]; then
+        print_error "No assistant selected."
+        return 1
+    fi
+
+    # Destination mapping. Claude Code and Cline both read <repo>/.claude/skills
+    # at project level (verified against Cline 4.1.4, which scans
+    # .clinerules/skills, .cline/skills, .claude/skills, .agents/skills), so
+    # project-level installs share ONE copy rather than duplicating it.
+    # User-level differs: Cline's global roots are ~/.cline/skills and
+    # ~/.agents/skills — it does NOT read ~/.claude/skills.
+    if [ "$install_user" = true ]; then
+        [ "$want_claude" = true ] && { dest_roots+=("$HOME/.claude/skills"); dest_labels+=("Claude Code (user-level)"); }
+        [ "$want_kiro" = true ]   && { dest_roots+=("$HOME/.kiro/skills");   dest_labels+=("Kiro (user-level)"); }
+        [ "$want_cline" = true ]  && { dest_roots+=("$HOME/.cline/skills");  dest_labels+=("Cline (user-level)"); }
+    fi
+    if [ "$install_project" = true ]; then
+        if [ "$want_claude" = true ] || [ "$want_cline" = true ]; then
+            local shared_label="Claude Code (project)"
+            if [ "$want_claude" = true ] && [ "$want_cline" = true ]; then
+                shared_label="Claude Code + Cline (project)"
+            elif [ "$want_cline" = true ]; then
+                shared_label="Cline (project)"
+            fi
+            dest_roots+=("$codebase_dir/.claude/skills")
+            dest_labels+=("$shared_label")
+        fi
+        [ "$want_kiro" = true ] && { dest_roots+=("$codebase_dir/.kiro/skills"); dest_labels+=("Kiro (project)"); }
+    fi
+    echo ""
+
+    local install_count=0 kept_count=0
+    local i
+    for i in "${!dest_roots[@]}"; do
+        local dest_root="${dest_roots[$i]}"
+        local label="${dest_labels[$i]}"
+        local dest="$dest_root/iris-query"
+
+        if [ -e "$dest" ]; then
+            print_warning "$label: skill already installed at $dest"
+            local overwrite
+            read -r -p "Overwrite it (this is the upgrade path)? [Y/n]: " overwrite
+            overwrite=${overwrite:-Y}
+            case "$overwrite" in
+                [Yy]*) rm -rf "$dest" ;;
+                *)
+                    # Declining to overwrite an existing install is a valid
+                    # outcome, not a failure — the skill is already there.
+                    print_info "$label: left unchanged (existing install kept)."
+                    kept_count=$((kept_count + 1))
+                    continue
+                    ;;
+            esac
+        fi
+
+        if ! mkdir -p "$dest_root"; then
+            print_error "$label: could not create $dest_root"
+            continue
+        fi
+        if ! cp -R "$skill_src" "$dest_root/"; then
+            print_error "$label: copy failed"
+            continue
+        fi
+        # Never ship build noise into someone else's repo — it would show up in
+        # their git status.
+        find "$dest" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+        find "$dest" -name ".DS_Store" -type f -delete 2>/dev/null || true
+        chmod +x "$dest/scripts/"*.sh 2>/dev/null || true
+
+        # Verify the artifacts actually landed at the expected paths.
+        local missing=""
+        local required
+        for required in "SKILL.md" "scripts/check_staleness.py" \
+                        "scripts/extract_overview.py" "scripts/iris_setup_lite.sh" \
+                        "references/details.md"; do
+            [ -f "$dest/$required" ] || missing="${missing:+$missing, }$required"
+        done
+        if [ -n "$missing" ]; then
+            print_error "$label: install incomplete, missing: $missing"
+            continue
+        fi
+
+        print_success "$label: skill installed at $dest"
+        install_count=$((install_count + 1))
+
+        # Kiro gets the manual-refresh hook; other hosts have no equivalent.
+        if [ "$label" = "Kiro (project)" ]; then
+            local hook_dir="$codebase_dir/.kiro/hooks"
+            if mkdir -p "$hook_dir" && cp "$dest/templates/iris_reindex_manual.kiro.hook" "$hook_dir/"; then
+                print_success "Kiro: manual refresh hook installed at $hook_dir/iris_reindex_manual.kiro.hook"
+            else
+                print_warning "Kiro: could not install the manual refresh hook (skill still works)"
+            fi
+        fi
+    done
+
+    if [ "$install_count" -eq 0 ] && [ "$kept_count" -eq 0 ]; then
+        print_error "No skill installation completed."
+        return 1
+    fi
+    if [ "$install_count" -eq 0 ]; then
+        print_info "Existing installation(s) kept as-is."
+    fi
+    echo ""
+
+    # Step 4: index. This is the only costly, credentialed step — and the only
+    # one allowed to fail without failing the option.
+    local index_ok=false
+    print_info "The skill needs an index to query. Building it calls AWS Bedrock and incurs cost."
+    print_info "It is incremental: only new or changed files are summarized."
+    echo ""
+    local do_index
+    read -r -p "Build/update the index now? [Y/n]: " do_index
+    do_index=${do_index:-Y}
+
+    case "$do_index" in
+        [Yy]*)
+            if validate_aws_credentials; then
+                print_info "Indexing $codebase_dir (this can take a while on a large repo)..."
+                if "$venv_python" -m iris.cli prepare --codebase "$codebase_dir"; then
+                    index_ok=true
+                    print_success "Index built"
+                else
+                    print_warning "Indexing failed — the skill is installed but has no cache yet."
+                    print_info "Fix the underlying issue (model access, credentials), then re-run"
+                    print_info "this option or use the skill's own setup task."
+                fi
+            else
+                print_warning "Skipping indexing: no usable AWS credentials."
+                print_info "The skill is installed; it will explain the missing cache when asked."
+            fi
+            ;;
+        *)
+            print_info "Skipped indexing. The skill is installed but has no cache yet."
+            ;;
+    esac
+
+    # Confirm what actually exists on disk, by glob — never by rebuilding the
+    # cache folder name from the current directory name.
+    local cache_dir=""
+    local overview
+    while IFS= read -r overview; do
+        [ -n "$overview" ] || continue
+        cache_dir="$(dirname "$overview")"
+        break
+    done < <(find "$cache_parent" -maxdepth 2 -name codebase_overview.json 2>/dev/null | sort)
+
+    # Register the repo so a user-level skill install can locate this index from
+    # any working directory. Best-effort: never fail the option over it.
+    if [ -n "$cache_dir" ]; then
+        if "$venv_python" "$skill_src/scripts/check_staleness.py" \
+                --repo "$codebase_dir" --register >/dev/null 2>&1; then
+            print_success "Registered for cross-directory queries"
+        else
+            print_warning "Could not update the indexed-repo registry"
+            print_info "Queries still work when the repo is named or --repo is passed."
+        fi
+    fi
+
+    # Step 5: next steps, stated explicitly — this is what turns a one-person
+    # setup into a whole-team benefit, and users will not think of it themselves.
+    print_header "Next Steps"
+
+    if [ -n "$cache_dir" ]; then
+        print_success "Index present at: $cache_dir"
+    else
+        print_warning "No index found under $cache_parent yet."
+        echo "   Ask the assistant to \"set up the IRIS index\" in that repo, or re-run this option."
+    fi
+    echo ""
+
+    local step=1
+
+    if [ "$install_project" = true ]; then
+        # Describe what to commit rather than printing exact git commands: the
+        # commands would be generated from what was *requested*, not from what
+        # landed on disk (an overwrite can be declined, the cache may live
+        # elsewhere, the target may not even be git-tracked).
+        echo "$step. Share with your team — commit the skill folder and the cache:"
+        echo ""
+        print_info "   In $codebase_dir, commit the skill directories installed above"
+        print_info "   together with the .iris_cache/ directory. Note that dot-directories"
+        print_info "   are often gitignored, so they may need to be force-added."
+        echo ""
+        print_info "   Teammates then need only 'git clone' — no IRIS install, no Python"
+        print_info "   environment, and no AWS credentials to ask questions."
+        if [ "$cache_parent" != "$codebase_dir/.iris_cache" ]; then
+            echo ""
+            print_warning "   The cache currently sits outside that repo ($cache_parent),"
+            print_warning "   so it will not travel with a clone. Move it under the repo to share it."
+        fi
+        echo ""
+        step=$((step + 1))
+    else
+        echo "$step. Share with your team (optional):"
+        echo ""
+        print_info "   You installed user-level only, so the skill is yours alone."
+        print_info "   To give teammates the same thing from a plain 'git clone',"
+        print_info "   re-run this option and choose project-level, then commit the"
+        print_info "   installed skill folder along with .iris_cache/."
+        print_info "   One committed .claude/skills/ serves Claude Code and Cline both."
+        echo ""
+        step=$((step + 1))
+    fi
+
+    echo "$step. Try it. Ask an assistant:"
+    echo "     \"what does this repo do?\"  or  \"where is authentication handled?\""
+    if [ "$install_user" = true ]; then
+        echo ""
+        print_info "   Because the skill is installed user-level, it works from ANY"
+        print_info "   directory — the assistant does not have to open $codebase_dir."
+        print_info "   This repo was registered, so the skill can locate its index."
+        print_info "   With several indexed repos it will ask which one you mean;"
+        print_info "   naming the repo in your question avoids the round-trip."
+    fi
+    echo ""
+    step=$((step + 1))
+
+    echo "$step. Refresh later, whenever you reach a good stopping point:"
+    echo "     ask the assistant to \"refresh the IRIS index\", or re-run this option."
+    if [ "$install_project" = true ] && [ "$want_kiro" = true ]; then
+        echo "     Kiro users also get a 'Refresh IRIS Index' button in the hooks UI."
+    fi
+    echo ""
+    print_info "Re-running this option after pulling IRIS updates is the upgrade path"
+    print_info "for the skill — it will offer to overwrite the installed copy."
+
+    if [ "$index_ok" = false ] && [ -z "$cache_dir" ]; then
+        echo ""
+        print_warning "Reminder: the skill works but will report a missing index until one is built."
+    fi
+
+    return 0
+}
+
+
 # Configure MCP server for a specific tool
 configure_mcp_tool() {
     local tool_name="$1"
@@ -1977,10 +2446,11 @@ show_main_menu() {
         echo "2. Local Testing (Docker - Local Artifacts)"
         echo "3. Local Testing (Docker - S3 Artifacts)"
         echo "4. Cloud Deployment (AgentCore Runtime - serverless)"
-        echo "5. MCP Server Deployment (Cline, Kiro and Amazon Q)"
-        echo "6. Exit "
+        echo "5. Agent Skill Installation (Claude Code, Kiro, Cline)"
+        echo "6. MCP Server Deployment (Cline, Kiro and Amazon Q)"
+        echo "7. Exit "
         echo ""
-        read -r -p "Select option [1-6]: " choice
+        read -r -p "Select option [1-7]: " choice
 
         case $choice in
             1)
@@ -1996,14 +2466,17 @@ show_main_menu() {
                 cloud_deploy_agentcore
                 ;;
             5)
-                setup_mcp_server
+                setup_agent_skill
                 ;;
             6)
+                setup_mcp_server
+                ;;
+            7)
                 print_info "Exiting..."
                 exit 0
                 ;;
             *)
-                print_error "Invalid option. Please select 1-6."
+                print_error "Invalid option. Please select 1-7."
                 ;;
         esac
 

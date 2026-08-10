@@ -72,8 +72,11 @@ def _build_middleware() -> Optional[list]:
             allow_origins=origins,
             allow_credentials=True,
             allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Content-Type", "Authorization",
-                           "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"],
+            allow_headers=[
+                "Content-Type",
+                "Authorization",
+                "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id",
+            ],
         )
     ]
 
@@ -159,7 +162,9 @@ async def _stream_chat(prompt: str, agent) -> AsyncGenerator[Dict[str, Any], Non
 
 
 @app.entrypoint
-async def invoke(payload: Dict[str, Any], context: Any) -> AsyncGenerator[Dict[str, Any], None]:
+async def invoke(
+    payload: Dict[str, Any], context: Any
+) -> AsyncGenerator[Dict[str, Any], None]:
     """AgentCore Runtime entrypoint.
 
     Chat is the default action and streams SSE events. A small set of non-chat

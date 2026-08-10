@@ -12,6 +12,7 @@ This comprehensive guide covers all deployment options for IRIS, from local deve
 - [Local Development Deployment](#local-development-deployment)
 - [Docker Deployment](#docker-deployment)
 - [Cloud Deployment (AWS)](#cloud-deployment-aws)
+- [Agent Skill Installation (Option 5)](#agent-skill-installation-option-5)
 - [Configuration](#configuration)
 - [Security Considerations](#security-considerations)
 - [Troubleshooting](#troubleshooting)
@@ -25,7 +26,8 @@ The fastest way to get started is using the interactive deployment script.
 ./deploy.sh
 ```
 
-This script provides 5 deployment options with guided setup for each.
+This script provides 6 options with guided setup for each: four deployment
+targets plus two coding-assistant integrations (Agent Skill, MCP Server).
 
 ## Deployment Options Overview
 
@@ -35,6 +37,13 @@ This script provides 5 deployment options with guided setup for each.
 | **Local Docker (Local Artifacts)** | Integration Testing       | Medium     | Docker, Docker Compose   | Testing frontend and backend servers in isolation    |
 | **Local Docker (S3 Artifacts)**    | Cloud Integration Testing | Medium     | Docker, S3 Bucket        | Cloud integration testing                            |
 | **Cloud Deployment (AgentCore)**   | Production                | High       | AWS Account, CDK, S3     | Serverless end-to-end cloud deployment for prod env  |
+| **Agent Skill (`iris-query`)**     | Coding assistant workflow | Low        | `.venv`, Claude Code/Kiro/Cline | Codebase Q&A inside your assistant; no credentials to query |
+| **MCP Server**                     | Coding assistant workflow | Low        | `.venv`, MCP-capable client | IRIS as MCP tools for Cline, Kiro, Amazon Q          |
+
+The last two are integrations rather than deployments, and are not mutually
+exclusive with each other or with any deployment above. See
+[Agent Skill Installation](#agent-skill-installation-option-5) for how to choose
+between them.
 
 ## Interactive Deployment Script
 
@@ -61,8 +70,9 @@ The `deploy.sh` script provides an interactive menu with comprehensive setup for
 2. **Local Testing (Docker - Local Artifacts)** - Containerized testing with local data
 3. **Local Testing (Docker - S3 Artifacts)** - Containerized testing with cloud data
 4. **Cloud Deployment (AgentCore Runtime - serverless)** - Full AWS deployment wizard
-5. **MCP Server Deployment** - Configure MCP server for Cline, Kiro, and Amazon Q
-6. **Exit**
+5. **Agent Skill Installation (Claude Code, Kiro, Cline)** - Install the `iris-query` Agent Skill into a target repo, so coding assistants answer questions from IRIS's precomputed index. Commit the skill plus `.iris_cache/` and teammates need only `git clone` — no IRIS install, no AWS credentials. Distinct from option 6; both can coexist.
+6. **MCP Server Deployment** - Configure MCP server for Cline, Kiro, and Amazon Q
+7. **Exit**
 
 > **📖 For Cloud Deployment:** After deployment completes, see the [User Management Guide](user-management.md) for detailed instructions on creating and sharing user accounts.
 
@@ -492,6 +502,109 @@ The wizard will guide you through:
 5. CDK infrastructure deployment (AgentCore Runtime + static frontend)
 6. Frontend build and upload (with the AgentRuntimeArn injected)
 7. Post-deployment user creation instructions
+
+## Agent Skill Installation (Option 5)
+
+Installs the `iris-query` Agent Skill so Claude Code, Kiro, or Cline answers
+codebase questions from IRIS's precomputed index instead of exploring from
+scratch. The skill reads `.iris_cache/` directly as data — no second LLM, and no
+AWS credentials at question time.
+
+For what the skill does and how it behaves once installed, see
+[`skills/iris-query/SKILL.md`](../skills/iris-query/SKILL.md). Cache layout, the
+overview JSON schema, per-host directories, and troubleshooting live in
+[`skills/iris-query/references/details.md`](../skills/iris-query/references/details.md).
+
+### Prerequisites
+
+- A completed IRIS install in this clone (`.venv` or `venv` with the `iris`
+  package). Option 5 aborts if it cannot find the virtual environment's Python,
+  because indexing needs it.
+- AWS credentials with Bedrock model access — for the **indexing** step only.
+  Querying an existing index needs none.
+- At least one of Claude Code, Kiro, or Cline. The script detects what is present
+  but lets you install for any of them regardless.
+
+### Running it
+
+```bash
+./deploy.sh
+# Select option 5: "Agent Skill Installation (Claude Code, Kiro, Cline)"
+```
+
+The flow is:
+
+1. **Records this IRIS install** at `${IRIS_HOME:-$HOME/.iris}/config.json` so the
+   skill can locate an interpreter that imports `iris` from any working
+   directory. Best-effort; a failure here only means the skill falls back to
+   searching.
+2. **Directory configuration.** Set `codebase_dir` to the repo you want indexed.
+   Leave `output_dir` as the relative `.iris_cache` — IRIS resolves it against
+   `codebase_dir`, so the cache lands inside the target repo and can be committed
+   next to the skill. The script warns if the resolved cache ends up outside
+   `<repo>/.iris_cache`, since it will not travel with a `git clone`.
+3. **Scope and host selection**, then the skill folder is copied (never
+   symlinked) into place. An existing install prompts before being overwritten;
+   that prompt is the upgrade path. A project-level Kiro install also gets a
+   manual refresh hook at `<repo>/.kiro/hooks/iris_reindex_manual.kiro.hook`.
+4. **Indexing**, which you can decline. It calls Bedrock and is incremental, so
+   only new or changed files are summarized.
+5. **Registration** for cross-directory queries, so a user-level install can find
+   this index from anywhere.
+
+The copy happens before indexing on purpose. If indexing fails on credentials or
+model access, you are left with an installed skill that explains the missing
+cache rather than a half-finished install.
+
+### Choosing a scope
+
+| Scope | Destination | Active when |
+| ----- | ----------- | ----------- |
+| User-level | `$HOME/.claude/skills/`, `$HOME/.kiro/skills/`, `$HOME/.cline/skills/` | Every session, whatever directory the assistant opens |
+| Project-level | `<repo>/.claude/skills/`, `<repo>/.kiro/skills/` | Only when the assistant opens that repo |
+
+Pick user-level if your editor does not open the indexed repo itself, which is
+common when working from a workspace root. Pick project-level if you want to
+commit the skill so teammates get it from `git clone`.
+
+Cline reads `<repo>/.claude/skills/` at project level, so one project-level copy
+serves both Claude Code and Cline. That does not hold at user level: Cline's
+global roots are `~/.cline/skills/` and `~/.agents/skills/`, and it deliberately
+does not read `~/.claude/skills/`.
+
+### Sharing with your team
+
+Commit both the skill folder and the cache:
+
+```bash
+git add .claude/skills/iris-query .iris_cache
+git commit -m "Add IRIS query skill and codebase index"
+```
+
+Teammates then need only `git clone` — no Python environment, no `iris` package,
+no AWS credentials. Keeping a committed cache fresh is a job for a pre-commit
+hook or CI, not the skill itself; `references/details.md` has the snippet.
+
+### Agent Skill or MCP Server?
+
+They solve the same problem differently and can both be installed at once.
+
+- **Agent Skill (option 5):** the assistant reads the index as data and does its
+  own file reading. No credentials, no extra LLM call, no server process. Ranking
+  is keyword-based over the summaries.
+- **MCP Server (option 6):** exposes IRIS's own `file_retrieval_agent` as a tool.
+  File selection is done by a Bedrock model, so it handles semantic matching the
+  skill cannot, at the cost of credentials and a model call per query.
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+| ------- | ------------- |
+| "Virtual environment not found" | Option 5 needs a completed install. Run option 1 first. |
+| "Skill source not found at .../skills/iris-query" | Running `deploy.sh` from outside the repo, or an incomplete clone. |
+| Indexing failed, skill installed | Usually Bedrock model access or expired credentials. Fix, then re-run option 5 or ask the assistant to run the skill's own setup task. |
+| Assistant never uses the skill | Wrong scope. A project-level install is inert unless the assistant opens that repo — reinstall at user level. |
+| Cache warning about location | `output_dir` was set to an absolute path. Reset it to `.iris_cache` so the cache lives inside the target repo. |
 
 ## Configuration
 

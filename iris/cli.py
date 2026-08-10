@@ -214,9 +214,7 @@ def ui():
 
         # Get paths
         current_dir = Path(__file__).resolve().parent
-        project_root = (
-            current_dir.parent
-        )  # Go up 1 level: iris -> project root
+        project_root = current_dir.parent  # Go up 1 level: iris -> project root
         react_app_path = project_root / "frontend"
         backend_path = project_root / "backend"
 

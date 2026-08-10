@@ -49,9 +49,7 @@ test_file.py
         """
 
         system_message = "You are a helpful assistant that analyzes code files."
-        model_id = (
-            "us.anthropic.claude-haiku-4-5-20251001-v1:0"  # Prompt caching model
-        )
+        model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"  # Prompt caching model
 
         # This should reproduce the ParamValidationError about cachePoint
         try:

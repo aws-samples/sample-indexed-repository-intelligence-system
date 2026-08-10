@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Refresh IRIS Index",
+  "description": "Manually refresh the IRIS codebase index for this repo. Deliberately manual: reindexing calls AWS Bedrock per changed file and summaries of half-finished code are worse than slightly stale ones. The iris-query skill detects staleness on every question, so run this when you have reached a good stopping point.",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Refresh the IRIS index for this repo using the iris-query skill (Task 3). Run scripts/iris_setup_lite.sh against the current repo root. Indexing is incremental, so report whether it was a no-op or which files were reprocessed. If the iris package or AWS credentials are missing, report exactly what is missing and stop — do not attempt to install anything."
+  }
+}

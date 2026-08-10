@@ -43,10 +43,10 @@ dependencies = [
   "tiktoken>=0.5.0",
   "ddgs>=9.10.0",
   "pillow>=11.3.1",
-  "cryptography>=48.0.1",
+  "cryptography>=50.0.0",
   "python-multipart>=0.0.30",
   "lxml>=6.1.0",
-  "gitpython>=3.1.55",
+  "gitpython>=3.1.58",
   "tornado>=6.5.7",
 ]
 
@@ -75,14 +75,23 @@ iris = ["pkg_config_template.yaml", "prompts/*.txt"]
 # Wait before resolving newly published package versions, to reduce exposure
 # to compromised or unstable releases landing in the index.
 exclude-newer = "7 days"
+# Narrow, per-package exemptions from the global cooling-off window, used only
+# when a security fix lands inside it. Pinned to a timestamp just past the
+# patched release so newer, un-vetted versions are still held back.
+exclude-newer-package = { gitpython = "2026-08-05T00:00:00Z" }
 constraint-dependencies = [
-  "gitpython>=3.1.55",
+  # GHSA-3f7w-8rr8-f37f, GHSA-4gmw-gg2m-w46p, GHSA-9rj7-rf2p-w77r, GHSA-hmq2-w58f-27jc
+  "gitpython>=3.1.58",
   "python-multipart>=0.0.30",
   "urllib3>=2.7.0",
   "lxml>=6.1.0",
-  "cryptography>=48.0.1",
+  # GHSA-g6cj-pr64-35w5
+  "cryptography>=50.0.0",
   "pytest>=9.0.3",
-  "aiohttp>=3.14.1",
+  # GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7, GHSA-mfx4-hv73-q22v
+  "aiohttp>=3.14.3",
+  # GHSA-6hr6-w5qg-qmwg
+  "h2>=4.4.1",
   "soupsieve>=2.8.4",
   "idna>=3.15",
   "pydantic-settings>=2.14.2",

@@ -40,6 +40,7 @@ This script installs Python virtual environment and provides 5 UI-based deployme
 | **Local Docker (Local Artifacts)** | Integration Testing       | Medium     | Docker, Docker Compose       | http://localhost:3000   |
 | **Local Docker (S3 Artifacts)**    | Cloud Integration Testing | Medium     | Docker, S3 Bucket            | http://localhost:3000   |
 | **Cloud Deployment**               | Production                | High       | AWS Account, CDK, S3, Docker | CloudFront URL          |
+| **Agent Skill Installation**       | AI Assistant Integration  | Low        | Python, AWS CLI (indexer only) | Via Claude Code/Kiro/Cline |
 | **MCP Server Deployment**          | AI Assistant Integration  | Low        | Python, AWS CLI              | Via Cline/Kiro          |
 
 Note: Options 2 and 3 (Local Docker deployments) are primarily intended for developers for testing purposes. End-users should choose other deployment options based on their use cases.
@@ -62,7 +63,15 @@ Note: Options 2 and 3 (Local Docker deployments) are primarily intended for deve
 # Get CloudFront URL at the end
 ```
 
-### For Developers: CLI Usage
+**Agent Skill:**
+
+```bash
+./deploy.sh
+# Select option 5, follow prompts
+# Open a new session in your coding assistant and start using the `iris-query` skill
+```
+
+### CLI Usage
 
 **Prerequisites:** Before using these CLI commands, you must first:
 
@@ -96,6 +105,24 @@ iris prepare
 ## Additional Documentation
 
 This documentation is organized into several key areas to help you understand, deploy, and develop with IRIS:
+
+### 🧠 [Agent Skill: `iris-query`](skills/iris-query/SKILL.md)
+
+**More efficient codebase exploration with Claude Code, Kiro, and Cline**
+
+**Start here if you're:** using Claude Code, Kiro, or Cline to understand or edit codebases but wanting to use a precomputed codebase summary to provide baseline context and accelerate the exploration.
+
+Install it with `./deploy.sh` → option 5. The skill reads the precomputed index
+(`.iris_cache/`) directly as data, so a coding assistant can find the right files
+in one lookup instead of 10–20 exploratory calls, then read those files to ground
+the answer.
+
+- **Zero-install for consumers.** Commit `.iris_cache/` and the skill folder; teammates need only `git clone` — no Python environment, no IRIS package, no AWS credentials.
+- **Staleness-safe.** Drift is detected by local hashing on every question; changed files are always read live rather than answered from a stale summary.
+- **One artifact, three hosts.** The same folder works in Claude Code, Kiro, and Cline.
+- **Complementary to the MCP server**, not a replacement — reading the index directly avoids a second LLM and needs no credentials at question time. Both integrations can be installed at once.
+
+See [`skills/iris-query/references/details.md`](skills/iris-query/references/details.md) for the index schema, troubleshooting, and how to keep a committed cache fresh via pre-commit or CI.
 
 ### 📋 [Development Guide](docs/dev-guide.md)
 

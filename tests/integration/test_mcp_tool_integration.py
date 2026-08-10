@@ -34,9 +34,9 @@ class TestMCPConfiguration:
             assert "enabled" in cfg, f"Server {name} missing 'enabled' field"
             assert "command" in cfg, f"Server {name} missing 'command' field"
             assert "args" in cfg, f"Server {name} missing 'args' field"
-            assert isinstance(cfg["args"], list), (
-                f"Server {name} 'args' should be a list"
-            )
+            assert isinstance(
+                cfg["args"], list
+            ), f"Server {name} 'args' should be a list"
 
 
 class TestMCPToolsLoading:

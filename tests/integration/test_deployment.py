@@ -21,9 +21,9 @@ class TestDeploymentConfigs:
         config_path = base_path / "config.yaml"
         if not config_path.exists():
             config_path = base_path / "config_template.yaml"
-        assert config_path.exists(), (
-            "Neither config.yaml nor config_template.yaml found"
-        )
+        assert (
+            config_path.exists()
+        ), "Neither config.yaml nor config_template.yaml found"
 
     def test_config_yaml_valid(self):
         """Test that config.yaml is valid YAML."""
@@ -161,9 +161,9 @@ class TestDockerBuild:
             # codebase, so a clean (--no-cache) build needs well over 300s.
             timeout=900,
         )
-        assert result.returncode == 0, (
-            f"Backend Docker build failed: {result.stderr.decode()}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"Backend Docker build failed: {result.stderr.decode()}"
 
     def test_frontend_dockerfile_valid(self):
         """Test frontend Dockerfile syntax."""
@@ -205,9 +205,9 @@ class TestDockerBuild:
         if result.returncode != 0 and b"No space left on device" in result.stderr:
             pytest.skip("Docker out of disk space - clean up Docker images/containers")
 
-        assert result.returncode == 0, (
-            f"Frontend Docker build failed: {result.stderr.decode()}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"Frontend Docker build failed: {result.stderr.decode()}"
 
 
 @pytest.mark.integration
@@ -279,6 +279,6 @@ class TestBackendScripts:
             )
             # Script may fail due to config issues, but should at least parse args correctly
             # Return code 2 means argument parsing error, which we want to catch
-            assert result.returncode != 2, (
-                f"Argument parsing failed: {result.stderr.decode()}"
-            )
+            assert (
+                result.returncode != 2
+            ), f"Argument parsing failed: {result.stderr.decode()}"

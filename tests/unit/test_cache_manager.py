@@ -138,6 +138,48 @@ class TestCodebaseCacheManager:
         assert result["modified_files"] == ["utils.py"]
         assert set(result["changed_files"]) == {"new.py", "utils.py"}
 
+    def test_has_changed_with_orphaned_hash(self, output_dir):
+        """A hash with no overview entry must not crash change detection.
+
+        Regression: cleanup prunes the orphan from self.hashes, so comparing
+        against a pre-cleanup key snapshot raised KeyError. The file still
+        exists on disk, so it has to come back as new and be re-summarized.
+        """
+        cache = CodebaseCacheManager(output_dir)
+
+        cache._hashes = {"main.py": "abc123", "orphaned.py": "xyz789"}
+        cache._overview = {"main.py": {"summary": "main"}}  # orphaned.py missing
+
+        current_hashes = {"main.py": "abc123", "orphaned.py": "xyz789"}
+
+        result = cache.has_changed(current_hashes)
+
+        assert result["new_files"] == ["orphaned.py"]
+        assert result["modified_files"] == []
+        assert result["deleted_files"] == []
+        assert result["changed_files"] == ["orphaned.py"]
+        assert result["has_changed"]
+
+    def test_has_changed_with_empty_overview(self, output_dir):
+        """A corrupt/unreadable overview reduces to a full reindex, not a crash.
+
+        Regression: load_codebase_overview returns {} for a corrupt file, which
+        made every hashed path an orphan and tripped the KeyError above.
+        """
+        cache = CodebaseCacheManager(output_dir)
+
+        cache._hashes = {"main.py": "abc123", "utils.py": "def456"}
+        cache._overview = {}
+
+        current_hashes = {"main.py": "abc123", "utils.py": "def456"}
+
+        result = cache.has_changed(current_hashes)
+
+        assert set(result["new_files"]) == {"main.py", "utils.py"}
+        assert result["modified_files"] == []
+        assert set(result["changed_files"]) == {"main.py", "utils.py"}
+        assert result["has_changed"]
+
     def test_remove_deleted_files_from_cache(self, output_dir):
         """Test removal of deleted files from cache."""
         cache = CodebaseCacheManager(output_dir)

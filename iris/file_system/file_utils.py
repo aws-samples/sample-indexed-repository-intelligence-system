@@ -69,7 +69,13 @@ def load_file_hashes(output_dir: str | Path) -> Dict[str, str]:
     try:
         with open(hashes_file, "r") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        # Fail soft so indexing can rebuild, but never silently: an unreadable
+        # cache is indistinguishable from a first run to every caller.
+        log.warning(
+            f"Could not read {hashes_file} ({type(e).__name__}: {e}); "
+            "treating file hashes as empty. Affected files will be re-summarized."
+        )
         return {}
 
 
@@ -82,7 +88,13 @@ def load_codebase_overview(output_dir: str | Path) -> Dict[str, dict]:
     try:
         with open(overview_file, "r") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        # Fail soft so indexing can rebuild, but never silently: returning {}
+        # here discards every cached summary, which is an expensive event to hide.
+        log.warning(
+            f"Could not read {overview_file} ({type(e).__name__}: {e}); "
+            "treating the codebase overview as empty. The codebase will be re-indexed."
+        )
         return {}
 
 

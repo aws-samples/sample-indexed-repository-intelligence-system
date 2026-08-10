@@ -4,6 +4,8 @@ import logging
 import json
 from pathlib import Path
 
+from ..file_system.file_utils import _atomic_json_write
+
 log = logging.getLogger(__name__)
 
 
@@ -100,11 +102,10 @@ def update_and_save_codebase_overview(
         if file_path in file_hashes:
             existing_hashes[file_path] = file_hashes[file_path]
 
-    # Save both overview and hashes
-    with open(codebase_overview_path, "w") as f:
-        json.dump(codebase_overview, f, indent=4)
-
-    with open(file_hashes_path, "w") as f:
-        json.dump(existing_hashes, f, indent=2)
+    # Save both overview and hashes. These writes must be atomic: this runs once
+    # per summarized file, so an in-place truncate would leave the index corrupt
+    # if the process dies mid-write.
+    _atomic_json_write(codebase_overview_path, codebase_overview, indent=4)
+    _atomic_json_write(file_hashes_path, existing_hashes, indent=2)
 
     return codebase_overview

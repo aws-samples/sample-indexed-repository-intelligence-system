@@ -8,9 +8,9 @@
     "@aws-amplify/ui-react": "^6.1.0",
     "@tailwindcss/typography": "^0.5.19",
     "aws-amplify": "^6.15.10",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.13",
     "lucide-react": "^0.562.0",
-    "mermaid": "^11.13.0",
+    "mermaid": "^11.16.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -43,7 +43,9 @@
     "fast-xml-parser": ">=5.6.0",
     "fast-xml-builder": ">=1.1.7",
     "uuid": ">=11.1.1",
-    "ws": ">=8.21.1"
+    "ws": ">=8.21.1",
+    "nanoid": "^3.3.17",
+    "dompurify": "$dompurify"
   },
   "resolutions": {
     "lodash": ">=4.18.0",
@@ -51,7 +53,9 @@
     "fast-xml-parser": ">=5.6.0",
     "fast-xml-builder": ">=1.1.7",
     "uuid": ">=11.1.1",
-    "ws": ">=8.21.1"
+    "ws": ">=8.21.1",
+    "nanoid": "^3.3.17",
+    "dompurify": ">=3.4.13"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",

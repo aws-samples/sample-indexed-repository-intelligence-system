@@ -104,8 +104,7 @@ class CodebaseCacheManager:
         # File in existing overview cache
         overview_keys = set(self.overview.keys())
 
-        # Find new and deleted files
-        new_files = list(current_keys - existing_keys)
+        # Find deleted files
         deleted_files = list(existing_keys - current_keys)
 
         # Find null reference summaries (entries in overview but not in current filesystem)
@@ -135,8 +134,17 @@ class CodebaseCacheManager:
                     f"Cleaned up {len(null_hashes)} orphaned hash entries: {null_hashes}"
                 )
 
+        # The cleanup above mutates self.hashes, so `existing_keys` no longer
+        # describes what is cached. Re-read it before comparing, otherwise a
+        # pruned-but-still-present path raises KeyError below.
+        cached_keys = set(self.hashes.keys())
+
+        # Find new files. Orphaned entries just pruned from the cache land here,
+        # so they get re-summarized instead of being silently skipped.
+        new_files = list(current_keys - cached_keys)
+
         # Find modified files (files that exist in both but have different hashes)
-        common_files = current_keys & existing_keys
+        common_files = current_keys & cached_keys
         modified_files = [
             file_path
             for file_path in common_files

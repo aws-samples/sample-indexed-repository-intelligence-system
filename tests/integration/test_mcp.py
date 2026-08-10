@@ -14,9 +14,7 @@ class TestMCPServer:
 
     def test_mcp_server_exists(self):
         """Test MCP server file exists."""
-        mcp_path = (
-            Path(__file__).parent.parent.parent / "iris_mcp" / "mcp_server.py"
-        )
+        mcp_path = Path(__file__).parent.parent.parent / "iris_mcp" / "mcp_server.py"
         assert mcp_path.exists()
 
     def test_mcp_server_imports(self):
@@ -30,9 +28,7 @@ class TestMCPServer:
 
     def test_mcp_init_exists(self):
         """Test MCP __init__.py exists."""
-        init_path = (
-            Path(__file__).parent.parent.parent / "iris_mcp" / "__init__.py"
-        )
+        init_path = Path(__file__).parent.parent.parent / "iris_mcp" / "__init__.py"
         assert init_path.exists()
 
     def test_mcp_server_has_tools(self):

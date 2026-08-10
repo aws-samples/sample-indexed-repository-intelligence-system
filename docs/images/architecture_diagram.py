@@ -44,7 +44,9 @@ with Diagram(
 
         with Cluster("Static frontend (Amazon CloudFront + Amazon S3)"):
             cf = CloudFront("Amazon CloudFront\n(OAC, HTTPS, SPA routing)")
-            s3site = SimpleStorageServiceS3("Frontend S3 bucket\n(private, static React app)")
+            s3site = SimpleStorageServiceS3(
+                "Frontend S3 bucket\n(private, static React app)"
+            )
 
         with Cluster("Amazon Bedrock AgentCore Runtime (serverless)"):
             authz = Cognito("Managed Cognito\nJWT authorizer")
@@ -61,7 +63,13 @@ with Diagram(
     user >> Edge(label="2 . authenticate, get access token") >> cognito
 
     # Chat: browser invokes the Runtime data-plane endpoint directly
-    user >> Edge(label="3 . POST /invocations (HTTPS, SSE)\nAuthorization: Bearer access token") >> authz
+    (
+        user
+        >> Edge(
+            label="3 . POST /invocations (HTTPS, SSE)\nAuthorization: Bearer access token"
+        )
+        >> authz
+    )
     authz >> Edge(label="4 . validate token, then forward") >> agent
     cognito >> Edge(label="OIDC discovery / JWKS", style="dashed") >> authz
 
