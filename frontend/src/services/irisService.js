@@ -56,16 +56,21 @@ class IrisService {
    * AgentCore requires a runtimeSessionId of at least 33 characters. Generate one
    * per chat and reuse it across turns so the Runtime keeps the same microVM (and
    * therefore the same in-memory conversation history).
+   *
+   * The session id keys server-side conversation state, so it is generated with
+   * crypto.getRandomValues (a CSPRNG) rather than Math.random. getRandomValues is
+   * used directly instead of crypto.randomUUID because randomUUID is only exposed
+   * in secure contexts, which would otherwise force a weak fallback path.
    */
   _ensureSessionId() {
     if (!this.sessionId) {
-      const raw =
-        (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(
-          /-/g,
-          "",
-        );
-      // pad to >= 33 chars
-      this.sessionId = `iris-${raw}${"0".repeat(33)}`.slice(0, 40);
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const raw = Array.from(bytes, (b) =>
+        b.toString(16).padStart(2, "0"),
+      ).join("");
+      // "iris-" + 32 hex chars = 37 characters, clearing the 33 char minimum.
+      this.sessionId = `iris-${raw}`;
     }
     return this.sessionId;
   }
