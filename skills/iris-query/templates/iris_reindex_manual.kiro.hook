@@ -1,13 +1,13 @@
 {
   "enabled": true,
   "name": "Refresh IRIS Index",
-  "description": "Manually refresh the IRIS codebase index for this repo. Deliberately manual: reindexing calls AWS Bedrock per changed file and summaries of half-finished code are worse than slightly stale ones. The iris-query skill detects staleness on every question, so run this when you have reached a good stopping point.",
+  "description": "Manually refresh the IRIS index for this repo — the codebase index, plus the project artifact index when an artifact directory is configured. Deliberately manual: reindexing calls AWS Bedrock per changed file and summaries of half-finished code are worse than slightly stale ones. The iris-query skill detects staleness on every question, so run this when you have reached a good stopping point.",
   "version": "1",
   "when": {
     "type": "userTriggered"
   },
   "then": {
     "type": "askAgent",
-    "prompt": "Refresh the IRIS index for this repo using the iris-query skill (Task 3). Run scripts/iris_setup_lite.sh against the current repo root. Indexing is incremental, so report whether it was a no-op or which files were reprocessed. If the iris package or AWS credentials are missing, report exactly what is missing and stop — do not attempt to install anything."
+    "prompt": "Refresh the IRIS index for this repo using the iris-query skill (Task 3). Run scripts/iris_setup_lite.sh against the current repo root. It refreshes the codebase index, and also the artifact index when .iris_cache/iris_skill_config.yaml records an artifact_dir. Indexing is incremental, so report per index whether it was a no-op or which files/artifacts were reprocessed. If the iris package or AWS credentials are missing, report exactly what is missing and stop — do not attempt to install anything. If an artifact index exists but its artifact_dir is not reachable on this machine, say so instead of silently refreshing the codebase only."
   }
 }

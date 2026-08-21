@@ -303,13 +303,13 @@
       "numericId": 8,
       "threatSource": "A malicious IDE plugin or compromised MCP client",
       "prerequisites": "with access to the local developer machine running the MCP server",
-      "threatAction": "exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal",
+      "threatAction": "exploit the MCP server's codebase_artifact_context or codebase_artifact_query tools to access files outside the intended codebase directory via path traversal",
       "threatImpact": "access to sensitive files on the developer's machine beyond the intended codebase scope",
       "impactedGoal": [],
       "impactedAssets": [
         "A008"
       ],
-      "statement": "A A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope",
+      "statement": "A A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_artifact_context or codebase_artifact_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope",
       "displayOrder": 8,
       "status": "threatIdentified",
       "tags": [

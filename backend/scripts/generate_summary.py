@@ -9,7 +9,9 @@ import sys
 import zipfile
 import boto3
 from pathlib import Path
+from iris.artifacts import resolve_artifact_dir
 from iris.generate_context import generate_context
+from iris.generate_artifact_context import generate_artifact_context
 from iris.utils.utils import (
     construct_output_dir,
     get_additional_context,
@@ -81,6 +83,26 @@ def generate_codebase_summary(
             print(f"✅ {result.message}")
             if verbose:
                 print(f"📁 Output directory: {output_dir}")
+
+        # Generate artifact context if a usable artifact_dir is configured.
+        # resolve_artifact_dir() returns None for unset, blank, placeholder,
+        # or non-existent directories.
+        artifact_dir = resolve_artifact_dir(config)
+        if artifact_dir:
+            print("📄 Indexing project artifacts...")
+            artifact_result = generate_artifact_context(
+                artifact_dir=artifact_dir,
+                output_dir=str(output_dir),
+                config=config,
+                verbose=verbose,
+            )
+            if artifact_result.status == "error":
+                print(f"⚠️  Artifact indexing failed: {artifact_result.message}")
+                print("   Continuing with codebase-only deployment...")
+            else:
+                print(f"✅ Artifacts: {artifact_result.message}")
+        elif verbose:
+            print("ℹ️  No usable artifact_dir configured — skipping artifact indexing")
 
         codebase_name = Path(codebase_dir).name
 

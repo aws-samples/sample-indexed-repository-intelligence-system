@@ -29,6 +29,7 @@ def create_docker_config():
     # Transform paths for Docker
     original_codebase = config.get("codebase_dir", "")
     original_output = config.get("output_dir", "")
+    original_artifact = config.get("artifact_dir", "")
 
     # Extract folder name from codebase path
     codebase_folder = Path(original_codebase).name
@@ -36,6 +37,15 @@ def create_docker_config():
     # Set Docker paths
     config["codebase_dir"] = f"/app/codebase_data/codebase/{codebase_folder}"
     config["output_dir"] = "/app/codebase_data/output"
+
+    # Blank artifact_dir: the host artifact folder is never mounted into the
+    # container, so keeping the host path would only bake an unusable absolute
+    # path (including the user's home directory) into the image. Artifacts reach
+    # the container as a pre-built index inside the representation zip that is
+    # unpacked into output_dir, and create_agent() enables the artifact tool from
+    # that pre-computed artifact_overview.json. Leaving this blank therefore keeps
+    # artifact QA working while making codebase-only deployments the clean default.
+    config["artifact_dir"] = ""
 
     # Write Docker config with proper indentation
     with open(docker_config_path, "w") as f:
@@ -53,6 +63,13 @@ def create_docker_config():
     print(f"   Original output_dir: {original_output}")
     print(f"   Docker codebase_dir:   {config['codebase_dir']}")
     print(f"   Docker output_dir:     {config['output_dir']}")
+    if original_artifact:
+        print(f"   Original artifact_dir: {original_artifact}")
+        print(
+            "   Docker artifact_dir:   (blank — artifacts served from pre-built index)"
+        )
+    else:
+        print("   Docker artifact_dir:   (blank — codebase-only mode)")
 
     return True
 

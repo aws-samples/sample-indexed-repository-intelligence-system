@@ -95,6 +95,33 @@ class TestMCPPromptBuilding:
         assert "AgentCore" not in prompt, "Should not mention disabled server"
 
 
+class TestMCPEnabledToolsConfig:
+    """Test MCP enabled tools configuration."""
+
+    def test_config_has_mcp_enabled_tools(self):
+        """Test that config includes mcp_enabled_tools."""
+        config = load_default_config()
+        assert "mcp_enabled_tools" in config, "Config should have mcp_enabled_tools"
+
+    def test_mcp_enabled_tools_is_list(self):
+        """Test that mcp_enabled_tools is a list."""
+        config = load_default_config()
+        tools = config.get("mcp_enabled_tools", [])
+        assert isinstance(tools, list), "mcp_enabled_tools should be a list"
+
+    def test_mcp_enabled_tools_contains_valid_names(self):
+        """Test that all entries in mcp_enabled_tools are valid tool names."""
+        valid_tools = {
+            "all",
+            "codebase_artifact_context",
+            "codebase_artifact_query",
+        }
+        config = load_default_config()
+        tools = config.get("mcp_enabled_tools", [])
+        for tool in tools:
+            assert tool in valid_tools, f"Unknown tool '{tool}' in mcp_enabled_tools"
+
+
 @pytest.mark.integration
 class TestMCPLiveIntegration:
     """Live integration tests - only run when MCP servers are enabled."""

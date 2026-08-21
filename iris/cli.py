@@ -13,6 +13,8 @@ import logging
 
 from .file_system.file_management import validate_tree
 from .generate_context import generate_context
+from .generate_artifact_context import generate_artifact_context
+from .artifacts import resolve_artifact_dir
 from .agentic_chat import cli_chat
 from .utils.utils import (
     construct_output_dir,
@@ -86,6 +88,15 @@ def chat(codebase, context, skip_validation):
 
 @cli.command()
 @click.option("--codebase", "-c", help="Path to codebase directory")
+@click.option(
+    "--code", is_flag=True, default=False, help="Generate/update codebase context only"
+)
+@click.option(
+    "--artifact",
+    is_flag=True,
+    default=False,
+    help="Generate/update project artifacts context only",
+)
 @click.option("--context", help="Path to additional context file")
 @click.option(
     "--verbose/--no-verbose",
@@ -93,8 +104,20 @@ def chat(codebase, context, skip_validation):
     default=True,
     help="Show detailed progress information (default: enabled)",
 )
-def prepare(codebase, context, verbose):
-    """Generate/update codebase context without starting a chat session."""
+def prepare(codebase, code, artifact, context, verbose):
+    """Generate/update codebase and artifact context.
+
+    By default (no flags), generates both codebase and artifact context.
+    Use --code to generate codebase context only.
+    Use --artifact to generate artifact context only.
+    """
+
+    # If neither flag is set, do both
+    do_codebase = True
+    do_artifact = True
+    if code or artifact:
+        do_codebase = code
+        do_artifact = artifact
 
     # Load config and set up proper paths
     config = load_default_config()
@@ -108,17 +131,45 @@ def prepare(codebase, context, verbose):
     additional_context = get_additional_context(filepath=context)
 
     try:
-        # Use the core generate_context function directly
-        result = generate_context(
-            codebase_dir=codebase,
-            output_dir=str(output_dir),
-            ignore_patterns=ignore_patterns,
-            additional_context=additional_context,
-            verbose=verbose,  # CLI wants verbose output
-        )
+        if do_codebase:
+            # Use the core generate_context function directly
+            result = generate_context(
+                codebase_dir=codebase,
+                output_dir=str(output_dir),
+                ignore_patterns=ignore_patterns,
+                additional_context=additional_context,
+                verbose=verbose,  # CLI wants verbose output
+            )
 
-        if result.status == "error":
-            sys.exit(1)
+            if result.status == "error":
+                sys.exit(1)
+
+        if do_artifact:
+            artifact_dir = resolve_artifact_dir(config)
+            if artifact_dir:
+                artifact_result = generate_artifact_context(
+                    artifact_dir=artifact_dir,
+                    output_dir=str(output_dir),
+                    config=config,
+                    verbose=verbose,
+                )
+                if artifact_result.status == "error":
+                    print(f"⚠️  Artifact indexing failed: {artifact_result.message}")
+                elif verbose and artifact_result.status == "update_complete":
+                    print("\n📊 Artifact Summary:")
+                    print(f"   Total artifacts: {artifact_result.total_artifacts}")
+                    print(
+                        f"   Processed: {len(artifact_result.processed_artifacts or [])}"
+                    )
+                    if artifact_result.knowledge_base_size:
+                        print(
+                            f"   Knowledge base: {artifact_result.knowledge_base_size} characters"
+                        )
+            else:
+                print(
+                    "⚠️  No usable artifact_dir configured (unset, placeholder, or "
+                    "missing directory). Skipping artifact indexing."
+                )
 
     except Exception as e:
         print(f"❌ Error: {e}")

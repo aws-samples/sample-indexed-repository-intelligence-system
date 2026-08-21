@@ -6,11 +6,14 @@
 # The codebase to evaluate
 codebase_dir: /path/to/your/codebase
 
+# The related project artifact directory (optional — leave empty or remove to skip artifact indexing)
+artifact_dir: /path/to/your/artifacts
+
 # The folder where code evaluation output is located
 output_dir: .iris_cache
 
 # MCP Server: List of tools to enable (default: all)
-# Options: "all", "codebase_context", "codebase_query"
+# Options: "all", "codebase_artifact_context", "codebase_artifact_query"
 mcp_enabled_tools:
   - all
 
@@ -59,6 +62,58 @@ context_file: /path/to/additional/context/file.txt
 
 # Whether to enable web search functionality
 web_search: true
+
+# Maximum size of artifact files to process (in bytes). Artifacts larger than this will be skipped.
+# Default: 30MB. For video files, see artifact_video_max_file_size below.
+artifact_max_file_size: 30_000_000
+
+# Maximum size of video files to process (in bytes). Videos larger than this will be skipped.
+# Video files are naturally much larger than documents, so this has a separate, higher limit.
+# Default: 300MB
+artifact_video_max_file_size: 300_000_000
+
+# Maximum number of parallel workers for artifact extraction and summarization.
+# Default: 4. Increase for faster processing on machines with more cores.
+artifact_max_workers: 4
+
+# Enable OCR for image-only PDF pages.
+# When enabled, pages with no extractable text are rendered as images and
+# processed by the selected OCR provider (see artifact_ocr_provider below).
+# Default: false (image-only pages are skipped with a warning)
+artifact_ocr_enabled: true
+
+# OCR provider for image-only PDF pages. Options:
+#   "llm"      — uses a multimodal LLM (Claude via Amazon Bedrock) to extract text from page images.
+#                 Reuses the first file_summarizer model. Requires Bedrock invoke permissions.
+#                 Better at understanding complex layouts, tables, and context.
+#   "textract" — uses Amazon Textract DetectDocumentText API.
+#                 Requires textract:DetectDocumentText permission.
+#                 Faster and cheaper per page, good for straightforward text extraction.
+# Default: "llm"
+artifact_ocr_provider: llm
+
+# Maximum number of PDF pages to OCR per indexing run.
+# Limits API calls to control cost. Once the limit is reached,
+# remaining image-only pages are skipped with a warning.
+# Set to 0 for unlimited. Default: 50
+artifact_ocr_max_pages: 50
+
+# Whether to generate the optional assembled knowledge_base.md for human review
+# Default: true
+artifact_generate_knowledge_base: true
+
+# Enable video transcription for video files (.mp4, .mov, .avi, .mkv).
+# When enabled, video files are processed with Amazon Transcribe (speech-to-text)
+# and LLM-based frame analysis (3 keyframes: near beginning, middle, near end).
+# Requires an S3 bucket for temporary video upload during transcription.
+# Cost: ~$0.024/min of audio. A 1-hour video costs ~$1.44 and takes ~10-15 min.
+# Default: false (video files indexed by metadata only)
+artifact_transcription_enabled: false
+
+# Amazon S3 bucket for temporary video upload during Amazon Transcribe processing.
+# Required when artifact_transcription_enabled is true.
+# The bucket must be accessible with your current AWS credentials.
+artifact_transcribe_s3_bucket: ""
 
 # MCP Server Integration - Connect to external MCP servers for additional capabilities
 mcp_servers:

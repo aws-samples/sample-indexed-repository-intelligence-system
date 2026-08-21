@@ -78,7 +78,7 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 | C005 | Amazon S3 Codebase Bucket        | Storage  | AWS              | External, customer-owned Amazon S3 bucket storing codebase artifacts and analysis outputs. SSE-S3 encryption enforced, optional CMK. Accessed read-only by the AgentCore execution role.                                                               |
 | C006 | Amazon Cognito                   | Security | AWS              | Amazon Cognito User Pool + User Pool Client providing JWT-based authentication (RS256). Issues access and ID tokens; the frontend sends the access token. The AgentCore Runtime authorizer validates tokens against the pool's OIDC discovery URL (`allowedClients` = app client id). Self-signup disabled by default. |
 | C007 | Amazon CloudWatch Logs           | Other    | AWS              | Amazon CloudWatch Logs for Runtime application events and errors (`/aws/bedrock-agentcore/runtimes/*`), plus Amazon CloudFront access logs and Amazon S3 server access logs stored in Amazon S3, and AWS X-Ray traces. Default 7-day retention, configurable. |
-| C008 | MCP Server                       | Compute  | Other            | Local MCP server exposing codebase_context and codebase_query tools for IDE integration. Runs as a local process, communicates via stdio. Provides path validation and configurable tool enablement.                                                    |
+| C008 | MCP Server                       | Compute  | Other            | Local MCP server exposing codebase_artifact_context and codebase_artifact_query tools for IDE integration. Runs as a local process, communicates via stdio. Provides path validation and configurable tool enablement.                                                    |
 
 ### Connections
 
@@ -438,10 +438,10 @@ IRIS is a cloud-native AI-powered code analysis and chat application built on AW
 
 #### T8: A malicious IDE plugin or compromised MCP client
 
-**Statement**: A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope.
+**Statement**: A malicious IDE plugin or compromised MCP client with access to the local developer machine running the MCP server can exploit the MCP server's codebase_artifact_context or codebase_artifact_query tools to access files outside the intended codebase directory via path traversal, which leads to access to sensitive files on the developer's machine beyond the intended codebase scope.
 
 - **Prerequisites**: with access to the local developer machine running the MCP server
-- **Action**: exploit the MCP server's codebase_context or codebase_query tools to access files outside the intended codebase directory via path traversal
+- **Action**: exploit the MCP server's codebase_artifact_context or codebase_artifact_query tools to access files outside the intended codebase directory via path traversal
 - **Impact**: access to sensitive files on the developer's machine beyond the intended codebase scope
 - **Impacted Assets**: A008
 - **Tags**: MCP, local, file-access

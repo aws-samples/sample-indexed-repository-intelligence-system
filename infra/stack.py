@@ -445,14 +445,25 @@ class IrisStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Suppress NAG warning for disabled advanced security mode
+        # Suppress NAG warning for disabled advanced security mode.
+        # COG3 (advanced_security_mode) and COG8 (feature plan / Plus tier) flag the
+        # same gap through the old and new Cognito APIs respectively. The pool is
+        # intentionally left on ESSENTIALS, so both are acknowledged together.
+        # NOTE: this accepts the risk rather than closing it — ESSENTIALS has no
+        # threat protection (malicious sign-in detection, compromised-password
+        # checks). Revisit with feature_plan=cognito.FeaturePlan.PLUS if this
+        # deployment ever fronts untrusted users.
         self._suppress_nag(
             user_pool,
             [
                 {
                     "id": "AwsSolutions-COG3",
                     "reason": "Advanced security mode disabled due to ESSENTIALS pricing tier limitation - threat protection features not supported",
-                }
+                },
+                {
+                    "id": "AwsSolutions-COG8",
+                    "reason": "Cognito feature plan intentionally left at ESSENTIALS; Plus tier threat protection is not required for this deployment (same rationale as AwsSolutions-COG3)",
+                },
             ],
         )
 

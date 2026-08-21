@@ -12,6 +12,12 @@
 
 set -euo pipefail
 
+# Reading a config key that is absent is normal, not an error: a config.yaml created
+# before a feature landed simply lacks that feature's keys. Under `pipefail` a
+# non-matching grep would fail the whole pipeline and `set -e` would abort the script
+# with no output, so every `key=$(grep ... )` read below ends in `|| true` and lets the
+# caller handle the empty value.
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,6 +28,13 @@ NC='\033[0m' # No Color
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Minimum AWS CDK CLI version required to read the cloud assembly produced by the
+# aws-cdk-lib pinned in pyproject.toml. An older CLI fails at synth time with
+# "Cloud assembly schema version mismatch", which otherwise only surfaces after
+# the codebase/artifact upload has already run. Bump this when aws-cdk-lib moves
+# to a newer schema version.
+MIN_CDK_CLI_VERSION="2.1129.0"
 
 # Function to print colored output
 print_success() {
@@ -120,7 +133,9 @@ run_installation() {
     echo "  iris chat               - Interactive chat"
     echo "  iris ui                 - Launch ReAct UI"
     echo "  iris streamlit          - Launch legacy Streamlit UI"
-    echo "  iris prepare            - Generate/update codebase context"
+    echo "  iris prepare            - Generate codebase + artifact context"
+    echo "  iris prepare --code     - Generate/update codebase context only"
+    echo "  iris prepare --artifact - Generate/update artifact context only"
     echo ""
     echo "  Command options:"
     echo "  --codebase, -c <path>         - Specify codebase directory"
@@ -331,6 +346,41 @@ validate_aws_credentials() {
 }
 
 # Function to update infra config with S3 bucket
+# Verify the AWS CDK CLI is new enough to read the cloud assembly that
+# aws-cdk-lib produces. Only the CDK-based cloud deployment needs this, so it is
+# checked there rather than in check_prerequisites() — options 1-3 never run cdk.
+check_cdk_cli_version() {
+    if ! command -v cdk &> /dev/null; then
+        print_error "AWS CDK CLI not found. Required for cloud deployment."
+        print_info "Install it with: npm i -g aws-cdk@latest"
+        return 1
+    fi
+
+    local current
+    current=$(cdk --version 2>/dev/null | awk '{print $1}')
+
+    # Only compare when the output actually looks like a version. A garbage or
+    # empty string must not be sorted against the minimum, otherwise it can
+    # compare as "newer" and report a false success.
+    if ! printf '%s' "$current" | grep -qE '^[0-9]+(\.[0-9]+)+$'; then
+        print_warning "Could not determine CDK CLI version (got '${current:-<empty>}') — continuing."
+        print_info "If 'cdk deploy' fails with a schema mismatch, upgrade: npm i -g aws-cdk@latest"
+        return 0
+    fi
+
+    # sort -V puts the lower version first; if that is the minimum, we are >= it.
+    if [ "$(printf '%s\n%s\n' "$MIN_CDK_CLI_VERSION" "$current" | sort -V | head -n1)" != "$MIN_CDK_CLI_VERSION" ]; then
+        print_error "CDK CLI $current is too old (need >= $MIN_CDK_CLI_VERSION)."
+        print_info "The bundled aws-cdk-lib emits a newer cloud assembly schema than"
+        print_info "this CLI can read, so 'cdk deploy' would fail during synthesis."
+        print_info "Upgrade with: npm i -g aws-cdk@latest"
+        return 1
+    fi
+
+    print_success "CDK CLI $current found (>= $MIN_CDK_CLI_VERSION)"
+    return 0
+}
+
 update_infra_config() {
     local bucket_name=$1
     local config_file="$SCRIPT_DIR/infra/config.yaml"
@@ -396,6 +446,376 @@ update_output_dir() {
     print_success "Updated config.yaml with output_dir: $output_dir"
 }
 
+# Function to update artifact_dir in config.yaml
+update_artifact_dir() {
+    local artifact_dir=$1
+    local config_file="$SCRIPT_DIR/config.yaml"
+
+    if [ ! -f "$config_file" ]; then
+        print_error "config.yaml not found"
+        return 1
+    fi
+
+    # Check if artifact_dir line exists in config
+    if grep -q "^artifact_dir:" "$config_file"; then
+        # Update existing line
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s|^artifact_dir: .*|artifact_dir: $artifact_dir|" "$config_file"
+        else
+            sed -i "s|^artifact_dir: .*|artifact_dir: $artifact_dir|" "$config_file"
+        fi
+    else
+        # Insert after codebase_dir line
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "/^codebase_dir: .*/a\\
+artifact_dir: $artifact_dir" "$config_file"
+        else
+            sed -i "/^codebase_dir: .*/a artifact_dir: $artifact_dir" "$config_file"
+        fi
+    fi
+
+    print_success "Updated config.yaml with artifact_dir: $artifact_dir"
+}
+
+# Function to clear artifact_dir in config.yaml (set to empty to skip artifact indexing)
+clear_artifact_dir() {
+    local config_file="$SCRIPT_DIR/config.yaml"
+
+    if [ ! -f "$config_file" ]; then
+        return 0
+    fi
+
+    if grep -q "^artifact_dir:" "$config_file"; then
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s|^artifact_dir: .*|artifact_dir: |" "$config_file"
+        else
+            sed -i "s|^artifact_dir: .*|artifact_dir: |" "$config_file"
+        fi
+    fi
+}
+
+# Function to update a config.yaml field using sed (handles both existing and missing keys)
+update_config_field() {
+    local field_name=$1
+    local field_value=$2
+    local config_file="$SCRIPT_DIR/config.yaml"
+
+    if [ ! -f "$config_file" ]; then
+        print_error "config.yaml not found"
+        return 1
+    fi
+
+    if grep -q "^${field_name}:" "$config_file"; then
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s|^${field_name}: .*|${field_name}: ${field_value}|" "$config_file"
+        else
+            sed -i "s|^${field_name}: .*|${field_name}: ${field_value}|" "$config_file"
+        fi
+    else
+        echo "${field_name}: ${field_value}" >> "$config_file"
+    fi
+}
+
+# Function to check if ffmpeg/ffprobe is installed and offer to install if missing
+# Required for video keyframe extraction during transcription
+ensure_ffmpeg_installed() {
+    if command -v ffmpeg &> /dev/null && command -v ffprobe &> /dev/null; then
+        print_success "ffmpeg and ffprobe found"
+        return 0
+    fi
+
+    echo ""
+    print_warning "ffmpeg/ffprobe not found. Required for video keyframe extraction."
+    print_info "Without ffmpeg, video transcription still works but keyframe analysis will be skipped."
+    echo ""
+
+    while true; do
+        print_prompt "Install ffmpeg now? [Y/n]: "
+        read -r reply
+        reply=${reply:-Y}
+        case $reply in
+            [Yy]* )
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    # macOS
+                    if command -v brew &> /dev/null; then
+                        print_info "Installing ffmpeg via Homebrew..."
+                        brew install ffmpeg
+                    else
+                        print_error "Homebrew not found. Please install ffmpeg manually: brew install ffmpeg"
+                        return 1
+                    fi
+                elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+                    # Linux
+                    if command -v apt-get &> /dev/null; then
+                        print_info "Installing ffmpeg via apt..."
+                        sudo apt-get update && sudo apt-get install -y ffmpeg
+                    elif command -v yum &> /dev/null; then
+                        print_info "Installing ffmpeg via yum..."
+                        sudo yum install -y ffmpeg
+                    elif command -v dnf &> /dev/null; then
+                        print_info "Installing ffmpeg via dnf..."
+                        sudo dnf install -y ffmpeg
+                    else
+                        print_error "No supported package manager found. Please install ffmpeg manually."
+                        return 1
+                    fi
+                elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
+                    # Windows (Git Bash / MSYS / Cygwin)
+                    if command -v choco &> /dev/null; then
+                        print_info "Installing ffmpeg via Chocolatey..."
+                        choco install ffmpeg -y
+                    elif command -v winget &> /dev/null; then
+                        print_info "Installing ffmpeg via winget..."
+                        winget install ffmpeg
+                    elif command -v scoop &> /dev/null; then
+                        print_info "Installing ffmpeg via Scoop..."
+                        scoop install ffmpeg
+                    else
+                        print_error "No supported package manager found (choco/winget/scoop)."
+                        print_info "Please install ffmpeg manually from https://ffmpeg.org/download.html"
+                        return 1
+                    fi
+                else
+                    print_error "Unsupported OS: $OSTYPE. Please install ffmpeg manually."
+                    return 1
+                fi
+
+                # Verify installation
+                if command -v ffmpeg &> /dev/null; then
+                    print_success "ffmpeg installed successfully"
+                else
+                    print_warning "ffmpeg installation may have failed. Keyframe analysis will be skipped."
+                fi
+                break
+                ;;
+            [Nn]* )
+                print_info "Skipping ffmpeg installation. Keyframe analysis will be unavailable."
+                break
+                ;;
+            * )
+                print_error "Please answer y or n."
+                ;;
+        esac
+    done
+}
+
+# Function to check and configure video transcription settings
+# Called after artifact directory is confirmed, only if artifact_dir is set
+configure_video_transcription() {
+    local config_file="$SCRIPT_DIR/config.yaml"
+
+    # Check if transcription is enabled in config
+    local transcription_enabled="false"
+    if [ -f "$config_file" ]; then
+        transcription_enabled=$(grep "^artifact_transcription_enabled:" "$config_file" | sed 's/artifact_transcription_enabled: *//' | xargs || true)
+    fi
+
+    if [ "$transcription_enabled" != "true" ]; then
+        return 0
+    fi
+
+    # Transcription is enabled — warn user about cost and delay
+    echo ""
+    print_header "Video Transcription Configuration"
+    print_warning "Video transcription is ENABLED in config.yaml."
+    echo ""
+    print_info "This uses Amazon Transcribe to convert speech-to-text in video files,"
+    print_info "plus LLM-based analysis of 3 keyframes per video."
+    echo ""
+    print_warning "Cost and time estimates:"
+    echo "  - Amazon Transcribe: ~\$0.024 per minute of audio"
+    echo "  - A 1-hour video: ~\$1.44 and ~10-15 minutes processing time"
+    echo "  - Requires an Amazon S3 bucket for temporary video upload"
+    echo ""
+
+    while true; do
+        print_prompt "Continue with video transcription enabled? [y/N]: "
+        read -r reply
+        reply=${reply:-N}
+        case $reply in
+            [Yy]* )
+                # User confirmed — now validate S3 bucket and region
+                local current_bucket=""
+
+                if [ -f "$config_file" ]; then
+                    current_bucket=$(grep "^artifact_transcribe_s3_bucket:" "$config_file" | sed 's/artifact_transcribe_s3_bucket: *//' | xargs | tr -d '"' || true)
+                fi
+
+                # Ask for S3 bucket
+                if [ -n "$current_bucket" ] && [ "$current_bucket" != '""' ]; then
+                    print_info "Current S3 bucket: $current_bucket"
+                    read -r -p "Enter S3 bucket for video upload [$current_bucket]: " new_bucket
+                    new_bucket=${new_bucket:-$current_bucket}
+                else
+                    read -r -p "Enter S3 bucket for temporary video upload (required): " new_bucket
+                fi
+
+                if [ -z "$new_bucket" ]; then
+                    print_warning "No S3 bucket provided — disabling video transcription."
+                    update_config_field "artifact_transcription_enabled" "false"
+                    return 0
+                fi
+
+                # Update config
+                update_config_field "artifact_transcribe_s3_bucket" "\"$new_bucket\""
+
+                print_success "Video transcription configured:"
+                echo "  S3 bucket: $new_bucket"
+                echo "  Region: auto-detected from bucket"
+
+                # Check and install ffmpeg (needed for keyframe extraction)
+                ensure_ffmpeg_installed
+
+                break
+                ;;
+            [Nn]* )
+                print_info "Disabling video transcription for this run."
+                update_config_field "artifact_transcription_enabled" "false"
+                break
+                ;;
+            * )
+                print_error "Please answer y or n."
+                ;;
+        esac
+    done
+
+    echo ""
+}
+
+# Function to configure artifact directory (optional, gracefully skips if invalid)
+configure_artifact_dir() {
+    print_header "Artifact Directory Configuration (Optional)"
+
+    print_info "Project artifacts (PPTX, DOCX, PDF, etc.) can be indexed alongside the codebase."
+    print_info "This is optional — skip to use codebase-only mode with zero overhead."
+    echo ""
+    print_info "Recommended artifact folder structure:"
+    echo ""
+    echo "  artifact_dir/"
+    echo "  ├── pre-project/"
+    echo "  │   ├── readouts/          (.docx)"
+    echo "  │   └── design_docs/       (.md, .txt)"
+    echo "  ├── during-project/"
+    echo "  │   ├── presentations/     (.pptx)"
+    echo "  │   ├── design_docs/       (.md, .txt)"
+    echo "  │   ├── meetings/          (.mp4, .mov, .avi, .mkv, .md, .txt)"
+    echo "  │   ├── reports/           (.pdf, .docx, .xlsx)"
+    echo "  │   └── technical_docs/    (.md, .txt)"
+    echo "  └── post-project/"
+    echo "      ├── readouts/          (.pptx, .docx)"
+    echo "      ├── roadmap/           (.md, .docx, .pdf)"
+    echo "      ├── production_readiness/ (.md, .docx, .pdf)"
+    echo "      └── constraints/       (.md, .docx, .pdf)"
+    echo ""
+    print_info "Files outside this structure are still indexed as 'unclassified'."
+    echo ""
+
+    # Read current artifact_dir from config.yaml
+    local current_artifact_dir=""
+    if [ -f "$SCRIPT_DIR/config.yaml" ]; then
+        current_artifact_dir=$(grep "^artifact_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/artifact_dir: *//' | xargs || true)
+    fi
+
+    # Check if current value is a placeholder or empty
+    local is_placeholder=false
+    if [ -z "$current_artifact_dir" ] || [ "$current_artifact_dir" = "/path/to/your/artifacts" ]; then
+        is_placeholder=true
+    fi
+
+    if [ "$is_placeholder" = true ]; then
+        # No valid artifact_dir configured — ask if user wants to set one
+        while true; do
+            print_prompt "Do you want to configure an artifact directory? [y/N]: "
+            read -r reply
+            reply=${reply:-N}
+            case $reply in
+                [Yy]* )
+                    read -r -p "Enter artifact directory path: " new_artifact_dir
+                    if [ -n "$new_artifact_dir" ]; then
+                        if [ -d "$new_artifact_dir" ]; then
+                            print_success "Artifact directory exists: $new_artifact_dir"
+                            update_artifact_dir "$new_artifact_dir"
+                        else
+                            print_warning "Artifact directory does not exist: $new_artifact_dir — skipping artifact indexing"
+                            clear_artifact_dir
+                        fi
+                    else
+                        print_info "No artifact directory provided — skipping artifact indexing"
+                        clear_artifact_dir
+                    fi
+                    break
+                    ;;
+                [Nn]* )
+                    print_info "Skipping artifact directory configuration — codebase-only mode"
+                    clear_artifact_dir
+                    break
+                    ;;
+                * )
+                    print_error "Please answer y or n."
+                    ;;
+            esac
+        done
+    else
+        # Existing artifact_dir configured — ask if user wants to keep it
+        print_info "Current artifact directory: $current_artifact_dir"
+
+        # Validate it exists
+        if [ ! -d "$current_artifact_dir" ]; then
+            print_warning "Artifact directory does not exist: $current_artifact_dir"
+        fi
+
+        while true; do
+            print_prompt "Keep current artifact directory? [Y/n/clear]: "
+            read -r reply
+            reply=${reply:-Y}
+            case $reply in
+                [Yy]* )
+                    if [ -d "$current_artifact_dir" ]; then
+                        print_success "Artifact directory exists: $current_artifact_dir"
+                        print_info "Keeping current artifact directory: $current_artifact_dir"
+                    else
+                        print_warning "Artifact directory does not exist — artifact indexing will be skipped at runtime"
+                    fi
+                    break
+                    ;;
+                [Nn]* )
+                    read -r -p "Enter new artifact directory path [$current_artifact_dir]: " new_artifact_dir
+                    new_artifact_dir=${new_artifact_dir:-$current_artifact_dir}
+                    if [ -n "$new_artifact_dir" ]; then
+                        if [ -d "$new_artifact_dir" ]; then
+                            print_success "Artifact directory exists: $new_artifact_dir"
+                            update_artifact_dir "$new_artifact_dir"
+                        else
+                            print_warning "Artifact directory does not exist: $new_artifact_dir — skipping artifact indexing"
+                            clear_artifact_dir
+                        fi
+                    fi
+                    break
+                    ;;
+                clear )
+                    print_info "Clearing artifact directory — codebase-only mode"
+                    clear_artifact_dir
+                    break
+                    ;;
+                * )
+                    print_error "Please answer y, n, or clear."
+                    ;;
+            esac
+        done
+    fi
+
+    # If artifact_dir is configured, check video transcription settings
+    local final_artifact_dir=""
+    if [ -f "$SCRIPT_DIR/config.yaml" ]; then
+        final_artifact_dir=$(grep "^artifact_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/artifact_dir: *//' | xargs || true)
+    fi
+    if [ -n "$final_artifact_dir" ] && [ "$final_artifact_dir" != "/path/to/your/artifacts" ]; then
+        configure_video_transcription
+    fi
+
+    echo ""
+}
+
 # Function to configure codebase and output directories
 configure_directories() {
     print_header "Directory Configuration"
@@ -405,8 +825,8 @@ configure_directories() {
     local current_output_dir=""
 
     if [ -f "$SCRIPT_DIR/config.yaml" ]; then
-        current_codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //')
-        current_output_dir=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //')
+        current_codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' || true)
+        current_output_dir=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //' || true)
     fi
 
     # Configure codebase directory
@@ -533,6 +953,9 @@ configure_directories() {
             update_output_dir "$new_output_dir"
         fi
     fi
+
+    # Configure artifact directory (optional)
+    configure_artifact_dir
 
     echo ""
 }
@@ -762,8 +1185,8 @@ setup_s3_bucket() {
     local current_bucket=""
     local current_kms_key=""
     if [ -f "$SCRIPT_DIR/infra/config.yaml" ]; then
-        current_bucket=$(grep -A 2 "^codebase_artifacts:" "$SCRIPT_DIR/infra/config.yaml" | grep "bucket:" | sed 's/.*bucket: "\(.*\)".*/\1/' | tr -d '"')
-        current_kms_key=$(grep -A 3 "^codebase_artifacts:" "$SCRIPT_DIR/infra/config.yaml" | grep "kms_key_arn:" | sed 's/.*kms_key_arn: "\(.*\)".*/\1/' | tr -d '"')
+        current_bucket=$(grep -A 2 "^codebase_artifacts:" "$SCRIPT_DIR/infra/config.yaml" | grep "bucket:" | sed 's/.*bucket: "\(.*\)".*/\1/' | tr -d '"' || true)
+        current_kms_key=$(grep -A 3 "^codebase_artifacts:" "$SCRIPT_DIR/infra/config.yaml" | grep "kms_key_arn:" | sed 's/.*kms_key_arn: "\(.*\)".*/\1/' | tr -d '"' || true)
     fi
 
     # Check if bucket is placeholder or a real value
@@ -961,8 +1384,8 @@ configure_directories_and_generate_docker_config() {
     local current_output_dir=""
 
     if [ -f "$SCRIPT_DIR/config.yaml" ]; then
-        current_codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //')
-        current_output_dir=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //')
+        current_codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' || true)
+        current_output_dir=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //' || true)
     fi
 
     # Configure codebase directory
@@ -1093,6 +1516,10 @@ configure_directories_and_generate_docker_config() {
     echo ""
 
     # Generate Docker configuration
+    # Configure artifact directory (optional)
+    configure_artifact_dir
+
+    # Generate Docker configuration
     print_info "Generating Docker configuration..."
     cd "$SCRIPT_DIR"
     if command -v uv &> /dev/null; then
@@ -1138,6 +1565,11 @@ local_test_no_docker() {
 
     # Step 2: Show project tree and get confirmation
     if ! show_project_tree; then
+        return 1
+    fi
+
+    # Step 2b: Show artifact tree and get confirmation (skipped if not configured)
+    if ! show_artifact_tree; then
         return 1
     fi
 
@@ -1283,6 +1715,11 @@ local_test_docker_local() {
         return 1
     fi
 
+    # Step 2b: Show artifact tree and get confirmation (skipped if not configured)
+    if ! show_artifact_tree; then
+        return 1
+    fi
+
     if command -v uv &> /dev/null; then
         print_info "Syncing dependencies..."
         uv sync
@@ -1349,6 +1786,11 @@ local_test_docker_s3() {
 
     # Show project tree and get confirmation before generating artifacts
     if ! show_project_tree; then
+        return 1
+    fi
+
+    # Show artifact tree and get confirmation (skipped if not configured)
+    if ! show_artifact_tree; then
         return 1
     fi
 
@@ -1445,6 +1887,70 @@ show_project_tree() {
     return 0
 }
 
+# Function to show the recognized project artifact tree
+# Skipped silently when no artifact_dir is configured (artifacts are optional).
+show_artifact_tree() {
+    # Nothing to preview unless artifact_dir points at a real directory
+    local config_file="$SCRIPT_DIR/config.yaml"
+    local artifact_dir=""
+    if [ -f "$config_file" ]; then
+        artifact_dir=$(grep "^artifact_dir:" "$config_file" | sed 's/artifact_dir: *//' | xargs || true)
+    fi
+
+    if [ -z "$artifact_dir" ] || [ "$artifact_dir" = "/path/to/your/artifacts" ] || [ ! -d "$artifact_dir" ]; then
+        return 0
+    fi
+
+    print_header "Artifact Tree Preview"
+
+    echo "This will show you exactly which artifact files will be included for indexing."
+    echo ""
+
+    # Check if we have Python available
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+        print_error "Python not found. Please install Python to use this feature."
+        return 1
+    fi
+
+    # Determine Python command
+    local python_cmd="python3"
+    if ! command -v python3 &> /dev/null; then
+        python_cmd="python"
+    fi
+
+    # Run the artifact tree script
+    if command -v uv &> /dev/null; then
+        print_info "Using uv to run artifact tree script..."
+        cd "$SCRIPT_DIR"
+        if ! uv run python backend/scripts/show_artifact_tree.py; then
+            print_error "Failed to generate artifact tree"
+            return 1
+        fi
+    else
+        print_info "Running artifact tree script with system Python..."
+        cd "$SCRIPT_DIR"
+        if ! $python_cmd backend/scripts/show_artifact_tree.py; then
+            print_error "Failed to generate artifact tree"
+            return 1
+        fi
+    fi
+
+    echo ""
+    print_info "Only files with supported artifact extensions are indexed. Files with any other extension (for example .py or .js) are filtered out and listed above."
+    print_info "Edit artifact_dir in config.yaml to change which folder is indexed."
+    echo ""
+    read -r -p "Do you want to proceed with these artifacts? [Y/n]: " -r
+    REPLY=${REPLY:-Y}
+
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_warning "You can edit artifact_dir in config.yaml, or reorganize the folder, to change which artifacts are included."
+        return 1
+    fi
+
+    print_success "Artifact tree confirmed - proceeding..."
+    return 0
+}
+
 # Function for cloud deployment
 
 # Serverless cloud deployment on Amazon Bedrock AgentCore Runtime.
@@ -1457,6 +1963,11 @@ cloud_deploy_agentcore() {
         return 1
     fi
     if ! validate_aws_credentials; then
+        return 1
+    fi
+    # Checked up front: a stale CDK CLI otherwise fails at synth, after the
+    # codebase and artifact index have already been generated and uploaded.
+    if ! check_cdk_cli_version; then
         return 1
     fi
 
@@ -1491,7 +2002,7 @@ cloud_deploy_agentcore() {
     print_header "Step 4: Configuration Review"
 
     # Step 4a: CDK Stack Name
-    current_stack_name=$(grep "^app_name:" "$SCRIPT_DIR/infra/config.yaml" | sed 's/app_name: "\(.*\)"/\1/' | tr -d '"')
+    current_stack_name=$(grep "^app_name:" "$SCRIPT_DIR/infra/config.yaml" | sed 's/app_name: "\(.*\)"/\1/' | tr -d '"' || true)
     print_info "Current CDK stack name: $current_stack_name"
     while true; do
         print_prompt "Keep current CDK stack name? [Y/n]: "
@@ -1524,7 +2035,7 @@ cloud_deploy_agentcore() {
     # Step 4b: Frontend App Name
     current_frontend_name=""
     if [ -f "$SCRIPT_DIR/frontend/runtime-config-cloud.js" ]; then
-        current_frontend_name=$(grep "appName:" "$SCRIPT_DIR/frontend/runtime-config-cloud.js" | sed "s/.*appName: *'\([^']*\)'.*/\1/")
+        current_frontend_name=$(grep "appName:" "$SCRIPT_DIR/frontend/runtime-config-cloud.js" | sed "s/.*appName: *'\([^']*\)'.*/\1/" || true)
     fi
     print_info "Current frontend app name: $current_frontend_name"
     while true; do
@@ -1608,6 +2119,9 @@ cloud_deploy_agentcore() {
     # Step 5: Generate & upload artifacts to S3 (the index the Runtime pulls at boot)
     print_header "Step 5: Generate & Upload Artifacts to S3"
     if ! show_project_tree; then
+        return 1
+    fi
+    if ! show_artifact_tree; then
         return 1
     fi
     cd "$SCRIPT_DIR"
@@ -1781,14 +2295,14 @@ cloud_deploy_agentcore() {
     echo "   - Click 'Users' → 'Create user'"
     echo ""
     echo "   Email-based users:"
-    echo "   - User name: user@yourcompany.com"
-    echo "   - Email address: user@yourcompany.com"
+    echo "   - User name: <user-email-address>"
+    echo "   - Email address: <user-email-address>"
     echo "   - ✅ Mark email address as verified"
     echo "   - Set temporary password"
     echo ""
     echo "   Username-based users:"
-    echo "   - User name: johndoe (custom username)"
-    echo "   - Email address: john.doe@yourcompany.com"
+    echo "   - User name: <custom-username>  (not an email address)"
+    echo "   - Email address: <user-email-address>"
     echo "   - ✅ Mark email address as verified"
     echo "   - Set temporary password"
     echo "   - ⚠️  IMPORTANT: Administrator must login first to set permanent password"
@@ -1918,7 +2432,7 @@ setup_agent_skill() {
     fi
 
     local codebase_dir output_dir_cfg cache_parent
-    codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' | tr -d '"')
+    codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' | tr -d '"' || true)
     if [ -z "$codebase_dir" ] || [ ! -d "$codebase_dir" ]; then
         print_error "codebase_dir is not set to a valid directory in config.yaml"
         return 1
@@ -1928,7 +2442,7 @@ setup_agent_skill() {
     # Resolve where the cache will actually land, mirroring IRIS's own rule
     # (utils.py: construct_output_dir) — relative output_dir resolves against
     # codebase_dir, absolute is used as-is.
-    output_dir_cfg=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //' | tr -d '"')
+    output_dir_cfg=$(grep "^output_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/output_dir: //' | tr -d '"' || true)
     output_dir_cfg=${output_dir_cfg:-.iris_cache}
     case "$output_dir_cfg" in
         /*) cache_parent="$output_dir_cfg" ;;
@@ -2279,127 +2793,270 @@ setup_agent_skill() {
 }
 
 
-# Configure MCP server for a specific tool
+# Write the iris-server entry into a single MCP config file.
+#
+# Args: label flavor config_file venv_python server_path aws_profile
+#
+# `flavor` selects the entry schema:
+#   claude      - Claude Code: {"type":"stdio", command, args, env}. Deliberately
+#                 no "timeout"/"disabled" keys — Claude Code has no per-server
+#                 timeout field; startup timeout comes from MCP_TIMEOUT instead.
+#   kiro, cline - Identical entry for both: `bash -c "source <venv>/activate &&
+#                 python <server>"` plus "timeout" and "disabled".
 configure_mcp_tool() {
-    local tool_name="$1"
-    local config_dir="$2"
-    local config_filename="$3"
+    local label="$1"
+    local flavor="$2"
+    local config_file="$3"
     local venv_python="$4"
     local server_path="$5"
     local aws_profile="$6"
 
-    local config_file="$config_dir/$config_filename"
-    print_info "Configuring MCP server for $tool_name..."
+    print_info "Configuring MCP server for $label..."
 
-    mkdir -p "$config_dir"
+    local config_dir
+    config_dir="$(dirname "$config_file")"
+    if ! mkdir -p "$config_dir"; then
+        print_error "$label: could not create $config_dir"
+        return 1
+    fi
 
+    # Read whatever is already there. ~/.claude.json in particular holds
+    # unrelated user state (per-project history, preferences), so never start
+    # from a blank object when the file exists, and refuse to touch it when it
+    # does not parse — rewriting it would destroy that state.
     local config
-    config=$([ -f "$config_file" ] && cat "$config_file" || echo '{"mcpServers":{}}')
+    if [ -f "$config_file" ]; then
+        if ! jq empty "$config_file" >/dev/null 2>&1; then
+            print_error "$label: $config_file is not valid JSON — refusing to overwrite it."
+            print_info "Fix or move that file, then re-run this option."
+            return 1
+        fi
+        config="$(cat "$config_file")"
+    else
+        config='{"mcpServers":{}}'
+    fi
 
-    if echo "$config" | grep -q '"iris-server"'; then
-        print_warning "iris-server already configured for $tool_name"
+    # Test for the key, not for the substring. A grep for '"iris-server"' would
+    # false-positive on any unrelated mention inside a large ~/.claude.json.
+    local existing
+    existing="$(printf '%s' "$config" | jq -r '.mcpServers["iris-server"] // empty')"
+    if [ -n "$existing" ]; then
+        print_warning "$label: iris-server already configured at $config_file"
+        local replace
+        read -r -p "Replace the existing entry? [Y/n]: " replace
+        replace=${replace:-Y}
+        case "$replace" in
+            [Yy]*) ;;
+            *)
+                print_info "$label: left unchanged (existing entry kept)."
+                return 0
+                ;;
+        esac
+    fi
+
+    # MCP calls can take 30-60+ seconds on large codebases, especially for indexing, so raise the
+    # per-server timeout on the hosts that have one.
+    local timeout=900000
+    local updated=""
+
+    case "$flavor" in
+        claude)
+            updated=$(printf '%s' "$config" | jq \
+                --arg python "$venv_python" \
+                --arg server "$server_path" \
+                --arg profile "$aws_profile" \
+                '.mcpServers["iris-server"] = {
+                    "type": "stdio",
+                    "command": $python,
+                    "args": [$server],
+                    "env": {"AWS_PROFILE": $profile}
+                }')
+            ;;
+        *)
+            # Kiro and Cline share one identical entry: the venv is activated
+            # explicitly before launching the server, and both carry the raised
+            # timeout plus the "disabled" flag their schemas support.
+            local venv_activate
+            if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+                venv_activate="${venv_python%/Scripts/python.exe}/Scripts/activate"
+            else
+                venv_activate="${venv_python%/bin/python}/bin/activate"
+            fi
+            updated=$(printf '%s' "$config" | jq \
+                --arg activate "$venv_activate" \
+                --arg server "$server_path" \
+                --arg profile "$aws_profile" \
+                --argjson timeout "$timeout" \
+                '.mcpServers["iris-server"] = {
+                    "command": "bash",
+                    "args": ["-c", ("source " + $activate + " && python " + $server)],
+                    "env": {"AWS_PROFILE": $profile},
+                    "timeout": $timeout,
+                    "disabled": false
+                }')
+            ;;
+    esac
+
+    # Only write once the new document is known-good. Writing the jq output
+    # unconditionally would truncate the file whenever jq failed.
+    if [ -z "$updated" ] || ! printf '%s' "$updated" | jq empty >/dev/null 2>&1; then
+        print_error "$label: could not build a valid config — $config_file left untouched."
+        return 1
+    fi
+
+    if [ -f "$config_file" ]; then
+        if cp "$config_file" "$config_file.iris-backup"; then
+            print_info "$label: previous config backed up to $config_file.iris-backup"
+        fi
+    fi
+
+    local tmp="$config_file.iris-tmp.$$"
+    if ! printf '%s\n' "$updated" > "$tmp"; then
+        print_error "$label: could not write to $config_dir"
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! mv "$tmp" "$config_file"; then
+        print_error "$label: could not update $config_file"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    print_success "$label: configured at $config_file"
+    return 0
+}
+
+# Verify an IRIS index exists for the repo the MCP server will serve, and offer
+# to build it when it does not.
+#
+# The MCP tools read from the precomputed cache under <output_dir>/<repo name>;
+# they never explore the repo live. Registering the server without that cache
+# leaves every query returning an empty overview, which reads as a broken server
+# rather than a missing setup step — so check here instead of at first use.
+#
+# Mirrors the Agent Skill option: the index build is the only costly, credentialed
+# step, and the only one allowed to fail without failing the option.
+#
+# Args: venv_python
+ensure_mcp_index() {
+    local venv_python="$1"
+    local config_file="$SCRIPT_DIR/config.yaml"
+
+    print_header "Index Check"
+
+    print_info "The MCP tools answer from a precomputed index rather than reading the"
+    print_info "repo live, so the server needs one before it can answer anything."
+    echo ""
+
+    local codebase_dir output_dir_cfg cache_parent artifact_dir
+    codebase_dir=$(grep "^codebase_dir:" "$config_file" | sed 's/codebase_dir: //' | tr -d '"')
+    if [ -z "$codebase_dir" ] || [ ! -d "$codebase_dir" ]; then
+        print_warning "codebase_dir in config.yaml is not a valid directory — skipping the index check."
+        print_info "Set it, then build the index with: $venv_python -m iris.cli prepare"
+        return 0
+    fi
+    codebase_dir="$(cd "$codebase_dir" && pwd)"
+
+    # Resolve where the cache actually lands, mirroring IRIS's own rule
+    # (utils.py: construct_output_dir) — a relative output_dir resolves against
+    # codebase_dir, an absolute one is used as-is.
+    output_dir_cfg=$(grep "^output_dir:" "$config_file" | sed 's/output_dir: //' | tr -d '"')
+    output_dir_cfg=${output_dir_cfg:-.iris_cache}
+    case "$output_dir_cfg" in
+        /*) cache_parent="$output_dir_cfg" ;;
+        *)  cache_parent="$codebase_dir/$output_dir_cfg" ;;
+    esac
+
+    artifact_dir=$(grep "^artifact_dir:" "$config_file" | sed 's/artifact_dir: *//' | xargs)
+    [ "$artifact_dir" = "/path/to/your/artifacts" ] && artifact_dir=""
+
+    # Locate the cache by glob rather than rebuilding <cache_parent>/<basename>,
+    # so a cache written under a differently-named folder is still found.
+    local cache_dir="" overview
+    while IFS= read -r overview; do
+        [ -n "$overview" ] || continue
+        cache_dir="$(dirname "$overview")"
+        break
+    done < <(find "$cache_parent" -maxdepth 2 -name codebase_overview.json 2>/dev/null | sort)
+
+    # Artifacts are only expected when artifact_dir is configured; a codebase-only
+    # setup is a valid end state, not a missing index.
+    local need_code=true need_artifact=false
+    [ -n "$cache_dir" ] && need_code=false
+    if [ -n "$artifact_dir" ] && \
+       { [ -z "$cache_dir" ] || [ ! -f "$cache_dir/artifact_overview.json" ]; }; then
+        need_artifact=true
+    fi
+
+    if [ "$need_code" = false ] && [ "$need_artifact" = false ]; then
+        print_success "Index present at: $cache_dir"
+        [ -n "$artifact_dir" ] && print_success "Artifact index present for: $artifact_dir"
+        print_info "Refresh it later with: $venv_python -m iris.cli prepare"
         return 0
     fi
 
-    # Set timeout to 10 minutes (600000ms) for Kiro and Cline
-    # Set timeout to 600000000ms for Amazon Q due to plugin bug (the plugin will divide the value with 1000)
-    # MCP operations can take 30-60+ seconds for large codebases
-    local timeout=600000
-    if [ "$tool_name" = "Amazon Q" ]; then
-        timeout=600000000
+    [ "$need_code" = true ] && print_warning "No codebase index found under $cache_parent"
+    [ "$need_artifact" = true ] && print_warning "No artifact index found for $artifact_dir"
+    echo ""
+    print_warning "The MCP server is registered but has nothing to query yet."
+    print_info "Building the index calls AWS Bedrock and incurs cost."
+    print_info "It is incremental: only new or changed files are summarized."
+    echo ""
+
+    local do_index
+    read -r -p "Build the index now? [Y/n]: " do_index
+    do_index=${do_index:-Y}
+    case "$do_index" in
+        [Yy]*) ;;
+        *)
+            print_info "Skipped. Build it before using the server:"
+            echo "     $venv_python -m iris.cli prepare"
+            return 0
+            ;;
+    esac
+
+    if ! validate_aws_credentials; then
+        print_warning "Skipping indexing: no usable AWS credentials."
+        print_info "Build it later with: $venv_python -m iris.cli prepare"
+        return 0
     fi
 
-    # Use bash command with source activation for Kiro
-    if [ "$tool_name" = "Kiro" ]; then
-        local venv_activate
-        if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-            venv_activate="${venv_python%/Scripts/python.exe}/Scripts/activate"
-        else
-            venv_activate="${venv_python%/bin/python}/bin/activate"
-        fi
-
-        config=$(echo "$config" | jq --arg activate "$venv_activate" --arg server "$server_path" --arg profile "$aws_profile" --argjson timeout "$timeout" \
-            '.mcpServers["iris-server"] = {
-                "command": "bash",
-                "args": ["-c", ("source " + $activate + " && python " + $server)],
-                "env": {"AWS_PROFILE": $profile},
-                "timeout": $timeout,
-                "disabled": false
-            }')
+    # No --code/--artifact flag: prepare does both by default and skips artifacts
+    # on its own when artifact_dir is unset or invalid.
+    print_info "Indexing $codebase_dir (this can take a while on a large repo)..."
+    if "$venv_python" -m iris.cli prepare --codebase "$codebase_dir"; then
+        print_success "Index built"
     else
-        # For Cline and Amazon Q, keep original direct python command
-        config=$(echo "$config" | jq --arg python "$venv_python" --arg server "$server_path" --arg profile "$aws_profile" --argjson timeout "$timeout" \
-            '.mcpServers["iris-server"] = {
-                "command": $python,
-                "args": [$server],
-                "env": {"AWS_PROFILE": $profile},
-                "timeout": $timeout,
-                "disabled": false
-            }')
+        print_warning "Indexing failed — the server is registered but has no cache yet."
+        print_info "Fix the underlying issue (model access, credentials), then run:"
+        echo "     $venv_python -m iris.cli prepare"
     fi
 
-    echo "$config" > "$config_file"
-    print_success "$tool_name MCP server configured at: $config_file"
+    return 0
 }
 
 # Setup MCP server for AI assistants
 setup_mcp_server() {
-    print_header "MCP Server Deployment (Cline, Kiro and Amazon Q)"
+    print_header "MCP Server Deployment (Claude Code, Kiro, Cline)"
 
-    # Prompt for AWS profile
-    print_info "AWS profiles are configured in ~/.aws/config (macOS/Linux) or %USERPROFILE%\.aws\config (Windows)"
-    printf "\n"
-    read -r -p "Enter AWS profile name used [default]: " aws_profile
-    aws_profile=${aws_profile:-default}
-    print_success "Using AWS profile: $aws_profile"
+    print_info "Registers the IRIS MCP server as 'iris-server', exposing the"
+    print_info "codebase_artifact_context and codebase_artifact_query tools."
+    print_info "This is separate from the Agent Skill option (option 5) — both can coexist."
     echo ""
 
-    # Detect OS and set config paths
-    local is_windows=false
-    [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && is_windows=true
-
-    local cline_dir q_dir kiro_dir
-    if [ "$is_windows" = true ]; then
-        cline_dir="$APPDATA/Code/User/globalStorage/saoudrizwan.claude-dev/settings"
-        q_dir="$APPDATA/amazonq"
-        kiro_dir="$HOME/.kiro/settings"
-    else
-        cline_dir="$HOME/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings"
-        q_dir="$HOME/.aws/amazonq"
-        kiro_dir="$HOME/.kiro/settings"
-    fi
-
-    # Detect installed tools
-    local found_tools=()
-    local tool_dirs=()
-    local tool_files=()
-
-    if [ -d "$cline_dir" ]; then
-        found_tools+=("Cline")
-        tool_dirs+=("$cline_dir")
-        tool_files+=("cline_mcp_settings.json")
-    fi
-
-    if [ -d "$q_dir" ]; then
-        found_tools+=("Amazon Q")
-        tool_dirs+=("$q_dir")
-        tool_files+=("mcp.json")
-    fi
-
-    if [ -d "$kiro_dir" ]; then
-        found_tools+=("Kiro")
-        tool_dirs+=("$kiro_dir")
-        tool_files+=("mcp.json")
-    fi
-
-    if [ ${#found_tools[@]} -eq 0 ]; then
-        print_warning "No AI assistant tools detected."
-        print_info "Please install Cline, Kiro or Amazon Q first."
+    # jq does all the JSON editing here, including in-place merges into files
+    # that hold unrelated user state. Without it there is no safe path.
+    if ! command -v jq >/dev/null 2>&1; then
+        print_error "jq is required to edit MCP config files safely but was not found."
+        print_info "Install it (macOS: brew install jq, Debian/Ubuntu: apt-get install jq) and re-run."
         return 1
     fi
 
-    print_success "Detected: ${found_tools[*]}"
-    echo ""
+    local server_path="$SCRIPT_DIR/iris_mcp/mcp_server.py"
+    if [ ! -f "$server_path" ]; then
+        print_error "MCP server not found at $server_path"
+        return 1
+    fi
 
     # Get venv python path
     local venv_python
@@ -2422,20 +3079,230 @@ setup_mcp_server() {
             return 1
         fi
     fi
+    if [ ! -x "$venv_python" ]; then
+        print_error "Virtual environment Python not found at: $venv_python"
+        return 1
+    fi
 
-    local server_path="$SCRIPT_DIR/iris_mcp/mcp_server.py"
+    # Prompt for AWS profile
+    print_info "AWS profiles are configured in ~/.aws/config (macOS/Linux) or %USERPROFILE%\\.aws\\config (Windows)"
+    printf "\n"
+    read -r -p "Enter AWS profile name used [default]: " aws_profile
+    aws_profile=${aws_profile:-default}
+    print_success "Using AWS profile: $aws_profile"
+    echo ""
 
-    # Configure each detected tool
-    for i in "${!found_tools[@]}"; do
-        configure_mcp_tool "${found_tools[$i]}" "${tool_dirs[$i]}" "${tool_files[$i]}" "$venv_python" "$server_path" "$aws_profile"
+    # Resolve per-host global config locations.
+    local is_windows=false
+    [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && is_windows=true
+
+    # Claude Code keeps user-scope servers under the top-level mcpServers key of
+    # ~/.claude.json (%USERPROFILE%\.claude.json on Windows). CLAUDE_CONFIG_DIR,
+    # when set, relocates that file.
+    local claude_home="${CLAUDE_CONFIG_DIR:-$HOME}"
+    if [ "$is_windows" = true ] && [ -z "$CLAUDE_CONFIG_DIR" ]; then
+        claude_home="${USERPROFILE:-$HOME}"
+    fi
+    local claude_global="$claude_home/.claude.json"
+
+    local kiro_global="$HOME/.kiro/settings/mcp.json"
+
+    # Cline stores MCP settings only in the extension's globalStorage. The path
+    # is platform-specific; the Linux branch matters because VS Code uses
+    # ~/.config there rather than ~/Library.
+    local cline_global
+    if [ "$is_windows" = true ]; then
+        cline_global="$APPDATA/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        cline_global="$HOME/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+    else
+        cline_global="$HOME/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+    fi
+
+    # Detect what is actually on this machine, purely to inform the choice —
+    # the user can still target a host we did not detect.
+    local claude_installed=false kiro_installed=false cline_installed=false
+    if [ -d "$HOME/.claude" ] || [ -f "$claude_global" ] || command -v claude >/dev/null 2>&1; then
+        claude_installed=true
+    fi
+    [ -d "$HOME/.kiro" ] && kiro_installed=true
+    if [ -d "$(dirname "$cline_global")" ] || [ -d "$HOME/.cline" ] || \
+       compgen -G "$HOME/.vscode/extensions/saoudrizwan.claude-dev-*" >/dev/null 2>&1 || \
+       compgen -G "$HOME/.vscode-server/extensions/saoudrizwan.claude-dev-*" >/dev/null 2>&1; then
+        cline_installed=true
+    fi
+
+    local detected=""
+    [ "$claude_installed" = true ] && detected="Claude Code"
+    [ "$kiro_installed" = true ] && detected="${detected:+$detected, }Kiro"
+    [ "$cline_installed" = true ] && detected="${detected:+$detected, }Cline"
+    if [ -n "$detected" ]; then
+        print_success "Detected on this machine: $detected"
+    else
+        print_warning "No supported assistant detected. You can still configure any of them."
+    fi
+    echo ""
+
+    # Scope first, mirroring the Agent Skill option. The distinction matters:
+    # a project-level entry only loads when the assistant opens THAT repo, while
+    # a global entry is available in every session regardless of directory.
+    echo "Where should the MCP server be registered?"
+    echo ""
+    echo "  1. Global (user-level)"
+    echo "     Claude Code -> $claude_global (top-level mcpServers)"
+    echo "     Kiro        -> $kiro_global"
+    echo "     Cline       -> globalStorage/cline_mcp_settings.json"
+    echo "     Available in EVERY session, whatever directory the assistant opens."
+    echo ""
+    echo "  2. Workspace/project-level"
+    echo "     Claude Code -> <codebase>/.mcp.json"
+    echo "     Kiro        -> <codebase>/.kiro/settings/mcp.json"
+    echo "     Commit it so teammates get the server from 'git clone'."
+    echo "     Only active when the assistant opens THAT repo. (Cline: not supported)"
+    echo ""
+    echo "  3. Both"
+    echo ""
+    local scope_choice
+    read -r -p "Select [1-3] (default 3): " scope_choice
+    scope_choice=${scope_choice:-3}
+
+    local install_global=false install_project=false
+    case "$scope_choice" in
+        1) install_global=true ;;
+        2) install_project=true ;;
+        3) install_global=true; install_project=true ;;
+        *) print_error "Invalid selection."; return 1 ;;
+    esac
+    echo ""
+
+    echo "Which assistant(s)?"
+    echo "  1. Claude Code"
+    echo "  2. Kiro"
+    echo "  3. Cline"
+    echo "  4. All"
+    echo ""
+    echo "  (comma-separated also works, e.g. '1,3')"
+    echo ""
+    local target_choice
+    read -r -p "Select [1-4] (default 4): " target_choice
+    target_choice=${target_choice:-4}
+
+    local want_claude=false want_kiro=false want_cline=false
+    # Tracked separately from want_cline: picking Cline by name is a request we
+    # may have to partially decline, while picking it via "All" is not.
+    local cline_explicit=false
+    local piece
+    local -a _picks=()
+    IFS=',' read -r -a _picks <<< "$target_choice"
+    for piece in "${_picks[@]}"; do
+        case "$(echo "$piece" | tr -d '[:space:]')" in
+            1) want_claude=true ;;
+            2) want_kiro=true ;;
+            3) want_cline=true; cline_explicit=true ;;
+            4) want_claude=true; want_kiro=true; want_cline=true ;;
+            "") ;;
+            *) print_error "Invalid selection: $piece"; return 1 ;;
+        esac
+    done
+    if [ "$want_claude" = false ] && [ "$want_kiro" = false ] && [ "$want_cline" = false ]; then
+        print_error "No assistant selected."
+        return 1
+    fi
+    echo ""
+
+    # A project-level entry needs to know which repo it belongs in, and the
+    # server reads codebase_dir from config.yaml at query time anyway.
+    local codebase_dir=""
+    if [ "$install_project" = true ]; then
+        print_info "Set the codebase directory to the repo the MCP server should serve."
+        echo ""
+        if ! configure_directories; then
+            print_error "Directory configuration failed."
+            return 1
+        fi
+        codebase_dir=$(grep "^codebase_dir:" "$SCRIPT_DIR/config.yaml" | sed 's/codebase_dir: //' | tr -d '"')
+        if [ -z "$codebase_dir" ] || [ ! -d "$codebase_dir" ]; then
+            print_error "codebase_dir is not set to a valid directory in config.yaml"
+            return 1
+        fi
+        codebase_dir="$(cd "$codebase_dir" && pwd)"
+        print_success "Target repo: $codebase_dir"
+        echo ""
+    fi
+
+    # Configure artifact directory (optional). The MCP server reads artifact_dir
+    # from config.yaml at query time, so offer it here too — otherwise a user who
+    # only ever runs this option would be left with the template placeholder and
+    # the artifact MCP tools would silently index code only.
+    configure_artifact_dir
+
+    # Build the target list: label, flavor, config file.
+    local -a t_labels=() t_flavors=() t_files=()
+
+    if [ "$install_global" = true ]; then
+        [ "$want_claude" = true ] && { t_labels+=("Claude Code (global)"); t_flavors+=("claude"); t_files+=("$claude_global"); }
+        [ "$want_kiro" = true ]   && { t_labels+=("Kiro (global)");        t_flavors+=("kiro");   t_files+=("$kiro_global"); }
+        [ "$want_cline" = true ]  && { t_labels+=("Cline (global)");       t_flavors+=("cline");  t_files+=("$cline_global"); }
+    fi
+
+    if [ "$install_project" = true ]; then
+        [ "$want_claude" = true ] && { t_labels+=("Claude Code (project)"); t_flavors+=("claude"); t_files+=("$codebase_dir/.mcp.json"); }
+        [ "$want_kiro" = true ]   && { t_labels+=("Kiro (project)");        t_flavors+=("kiro");   t_files+=("$codebase_dir/.kiro/settings/mcp.json"); }
+        # Only surface Cline's missing project-level support when it changes the
+        # outcome: the user named Cline specifically, or Cline gets no config at
+        # all because there is no global install to fall back on. Under "All"
+        # with a global install it is already covered, so the warning is noise.
+        if [ "$want_cline" = true ] && \
+           { [ "$cline_explicit" = true ] || [ "$install_global" = false ]; }; then
+            print_warning "Cline has no project-level MCP config (it reads only the global)"
+        fi
+    fi
+
+    if [ ${#t_labels[@]} -eq 0 ]; then
+        print_error "Nothing to configure for the selected scope and assistants."
+        return 1
+    fi
+    echo ""
+
+    local configured=0 failed=0
+    local i
+    for i in "${!t_labels[@]}"; do
+        if configure_mcp_tool "${t_labels[$i]}" "${t_flavors[$i]}" "${t_files[$i]}" \
+                              "$venv_python" "$server_path" "$aws_profile"; then
+            configured=$((configured + 1))
+        else
+            failed=$((failed + 1))
+        fi
     done
 
     echo ""
-    print_success "MCP server configuration complete!"
+    if [ "$configured" -eq 0 ]; then
+        print_error "No MCP server configuration completed."
+        return 1
+    fi
+    print_success "MCP server configuration complete ($configured configured, $failed failed)."
     print_info "Restart your AI assistant tools to use the iris MCP server."
+
+    if [ "$install_project" = true ] && [ "$want_claude" = true ]; then
+        echo ""
+        print_info "Claude Code prompts for approval the first time it sees a project-scoped"
+        print_info "server. Approve it, or run /mcp inside a session to approve later."
+        print_warning "$codebase_dir/.mcp.json contains absolute paths from this machine and the AWS profile name."
+    fi
+
+    if [ "$want_claude" = true ]; then
+        echo ""
+        print_info "Claude Code has no per-server timeout field. If startup times out on a"
+        print_info "large codebase, raise it in your shell: export MCP_TIMEOUT=900000"
+    fi
+
+    # Registration is local and cheap; indexing is costly and needs credentials.
+    # Do it last so a failed or declined index still leaves a registered server.
+    ensure_mcp_index "$venv_python"
+
     echo ""
     print_info "To test the iris-server, try this question:"
-    echo "  \"use codebase_query tool in iris-server mcp server to answer question: what does this repo do?\""
+    echo "  \"use codebase_artifact_query tool in iris-server mcp server to answer question: what does this repo do?\""
 }
 
 # Main menu
@@ -2447,7 +3314,7 @@ show_main_menu() {
         echo "3. Local Testing (Docker - S3 Artifacts)"
         echo "4. Cloud Deployment (AgentCore Runtime - serverless)"
         echo "5. Agent Skill Installation (Claude Code, Kiro, Cline)"
-        echo "6. MCP Server Deployment (Cline, Kiro and Amazon Q)"
+        echo "6. MCP Server Deployment (Claude Code, Kiro, Cline)"
         echo "7. Exit "
         echo ""
         read -r -p "Select option [1-7]: " choice

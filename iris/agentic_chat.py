@@ -25,6 +25,10 @@ from .agents.file_retrieval_agent import file_retrieval_agent
 from .agents.web_search_tool import web_search
 from .agents.code_search_tool import code_search_tool
 from .agents.mcp_tools import load_mcp_tools, build_mcp_prompt, get_mcp_tool_names
+from .agents.artifact_retrieval_agent import artifact_retrieval_agent
+from .generate_artifact_context import generate_artifact_context
+from .artifacts import resolve_artifact_dir
+from .artifacts.artifact_discovery import generate_artifact_tree_display
 
 log = logging.getLogger(__name__)
 
@@ -176,9 +180,29 @@ def create_agent(
     tools = [file_retrieval_agent, code_search_tool]
     system_message = load_prompts()["orchestrator_qa_only_system_message"]
 
+    # Add artifact_retrieval_agent if artifact_dir is usable OR
+    # pre-computed artifact data exists in the output directory (Docker/S3 deployments
+    # may not have artifact_dir set but still have pre-indexed artifact data).
+    artifact_dir = resolve_artifact_dir(config)
+    has_precomputed_artifacts = Path(output_folder, "artifact_overview.json").exists()
+    artifact_enabled = bool(artifact_dir) or has_precomputed_artifacts
+    if artifact_enabled:
+        tools.append(artifact_retrieval_agent)
+
     if config.get("web_search", False):
         tools.append(web_search)
         system_message += "\n\n" + load_prompts()["web_search"]
+
+    # Add artifact context instructions when artifacts are available
+    if artifact_enabled:
+        system_message += (
+            "\n\nYou also have access to project artifacts (documents, "
+            "presentations, reports, meeting notes, readouts) via the "
+            "artifact_retrieval_agent tool. When answering questions about "
+            "project context, project history, or non-code materials, "
+            "use this tool. Always attribute information to its source "
+            "(codebase or artifact)."
+        )
 
     # Load MCP server tools if configured
     mcp_tools = load_mcp_tools(config)
@@ -196,8 +220,10 @@ def create_agent(
 
         log.info(f"✓ Loaded {len(mcp_tools)} MCP tool providers from external servers")
 
-    # Build tools to drop list (file_retrieval_agent + all MCP tools)
+    # Build tools to drop list (file_retrieval_agent + artifact_retrieval_agent + all MCP tools)
     tools_to_drop = ["file_retrieval_agent"] + mcp_tool_names
+    if artifact_enabled:
+        tools_to_drop.append("artifact_retrieval_agent")
 
     # Create hooks
     hooks = []
@@ -272,6 +298,29 @@ def cli_chat(codebase_dir, context=None):
 
     ignore_patterns = get_ignore_patterns(codebase_dir=codebase_dir)
     additional_context = get_additional_context(filepath=context)
+
+    # Prepare artifact context if configured (no-op if artifact_dir absent)
+    artifact_dir = resolve_artifact_dir(config)
+    if artifact_dir:
+        try:
+            # Display artifact folder structure (mirrors codebase tree display)
+            artifact_tree = generate_artifact_tree_display(artifact_dir)
+            print("\n📂 Artifact directory tree:")
+            print(artifact_tree)
+            print()
+
+            artifact_result = generate_artifact_context(
+                artifact_dir=artifact_dir,
+                output_dir=str(output_folder),
+                config=config,
+                verbose=True,
+            )
+            log.info("Artifact context: %s", artifact_result.status)
+        except Exception as e:
+            log.warning(
+                "Artifact context preparation failed: %s — proceeding without artifacts.",
+                e,
+            )
 
     print("\n🔍 What would you like to know about the codebase?")
     while True:

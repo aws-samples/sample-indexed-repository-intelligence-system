@@ -1,7 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-"""Test MCP tool name extraction."""
+"""Test MCP tool name extraction and valid tool set."""
 
+import pytest
 from iris.agents.mcp_tools import get_mcp_tool_names
 
 
@@ -60,3 +61,45 @@ class TestGetMCPToolNames:
 
         names = get_mcp_tool_names([NoToolsProvider()])
         assert names == []
+
+
+@pytest.mark.unit
+class TestMCPValidToolSet:
+    """Test that the MCP server's valid tool set is correct."""
+
+    def test_valid_tools_includes_all_expected(self):
+        """Test that the valid_tools set in get_enabled_tools includes all tool names."""
+        try:
+            from iris_mcp.mcp_server import get_enabled_tools
+            from unittest.mock import patch
+
+            expected_tools = {
+                "all",
+                "codebase_artifact_context",
+                "codebase_artifact_query",
+            }
+
+            # Return all expected tools from config to verify none are filtered
+            with patch(
+                "iris.utils.utils.load_default_config",
+                return_value={"mcp_enabled_tools": list(expected_tools)},
+            ):
+                result = get_enabled_tools()
+                assert set(result) == expected_tools
+        except ImportError:
+            pytest.skip("MCP dependencies not installed")
+
+    def test_codebase_artifact_query_is_valid(self):
+        """Test that codebase_artifact_query is recognized as a valid tool."""
+        try:
+            from iris_mcp.mcp_server import get_enabled_tools
+            from unittest.mock import patch
+
+            with patch(
+                "iris.utils.utils.load_default_config",
+                return_value={"mcp_enabled_tools": ["codebase_artifact_query"]},
+            ):
+                result = get_enabled_tools()
+                assert "codebase_artifact_query" in result
+        except ImportError:
+            pytest.skip("MCP dependencies not installed")

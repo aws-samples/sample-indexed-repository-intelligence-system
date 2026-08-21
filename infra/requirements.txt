@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: MIT-0
 aws-cdk-lib>=2.100.0
 boto3>=1.26.0
-cdk-nag>=2.27.0
+# cdk-nag v3 removed the NagSuppressions API in favour of CDK's native
+# Validations.of().acknowledge(). infra/stack.py still uses the v2 API, so
+# stay on the 2.x line until that migration is done separately.
+cdk-nag>=2.27.0,<3
 constructs>=10.0.0
 PyYAML>=6.0

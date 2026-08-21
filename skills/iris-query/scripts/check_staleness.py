@@ -9,14 +9,23 @@ Re-hashes every file tracked in file_hashes.json (SHA-256, mirroring
 iris/file_system/file_utils.py:hash_file_content) and reports new / modified /
 deleted files plus a drift ratio and a verdict the agent can branch on.
 
+Artifacts (optional): when the cache also contains artifact_overview.json —
+IRIS's index of project artifacts (pptx/docx/xlsx/pdf/md/txt/video) built from
+a configured artifact_dir — the same drift check runs over
+artifact_file_hashes.json and is reported as a second, independent verdict.
+Artifact indexing is opt-in, so its absence is never an error: a repo with no
+artifact index is simply a codebase-only repo.
+
 Usage:
     python3 check_staleness.py [--repo DIR] [--cache DIR] [--threshold 0.15]
+                               [--artifact-dir DIR] [--no-artifacts]
                                [--json] [--quiet] [--no-new] [--limit N]
 
 Exit codes:
-    0  fresh (no drift)
+    0  fresh (no drift in the codebase index, and none in the artifact index
+       when one exists)
     1  usage / environment error (no cache found, unreadable cache)
-    2  stale (any drift, small or large)
+    2  stale (any drift, small or large, in either index)
 """
 
 import argparse
@@ -31,6 +40,40 @@ from pathlib import Path
 # oversized files at index time, so they must not be reported as "new" here.
 MAX_FILE_SIZE = 2_000_000
 MAX_NOTEBOOK_SIZE = 2_000_000_000
+
+# --- Artifact indexing (optional) ------------------------------------------
+#
+# Mirrors iris/artifacts/__init__.py:ARTIFACT_FORMATS and config_template.yaml's
+# artifact_* size limits, for the same reason the codebase constants above are
+# duplicated: this script must run with no iris install. Kept in sync by hand.
+ARTIFACT_EXTENSIONS = {
+    ".pptx",
+    ".docx",
+    ".xlsx",
+    ".md",
+    ".txt",
+    ".pdf",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+}
+ARTIFACT_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
+ARTIFACT_MAX_FILE_SIZE = 30_000_000
+ARTIFACT_VIDEO_MAX_FILE_SIZE = 300_000_000
+
+# Placeholder shipped in config_template.yaml; treated as "not configured", the
+# same way iris/artifacts/__init__.py:resolve_artifact_dir treats it.
+ARTIFACT_DIR_PLACEHOLDER = "/path/to/your/artifacts"
+
+# Cache files written by the artifact pipeline, alongside the codebase ones.
+ARTIFACT_OVERVIEW_FILE = "artifact_overview.json"
+ARTIFACT_HASHES_FILE = "artifact_file_hashes.json"
+
+# Config written by iris_setup_lite.sh. It is the skill's only record of where
+# artifact_dir points, since (unlike codebase_dir) that path cannot be derived
+# from the repo root.
+SKILL_CONFIG_NAME = "iris_skill_config.yaml"
 
 # Conservative subset of config_template.yaml ignore_patterns. Used only for
 # new-file detection (deleted/modified detection is exact, driven by the cache).
@@ -261,6 +304,8 @@ def load_registry():
                 "root": str(root_path.resolve()),
                 "cache": str(cache),
                 "indexed_at": entry.get("indexed_at"),
+                # Whether this repo also carries the optional artifact index.
+                "has_artifact_index": has_artifact_index(cache),
             }
         )
 
@@ -670,6 +715,396 @@ def analyze(repo_root, cache_dir, detect_new=True):
     }
 
 
+# ---------------------------------------------------------------------------
+# Artifacts — the optional second index, checked exactly like the codebase one
+# ---------------------------------------------------------------------------
+
+
+def load_json_soft(path):
+    """Load JSON, returning None instead of exiting when it cannot be read.
+
+    Used on the artifact path only. A broken artifact index must not sink a
+    perfectly good codebase answer, so failures here degrade rather than abort.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def has_artifact_index(cache_dir):
+    """True when this cache carries an artifact index at all."""
+    cache_dir = Path(cache_dir)
+    return (cache_dir / ARTIFACT_OVERVIEW_FILE).is_file() or (
+        cache_dir / ARTIFACT_HASHES_FILE
+    ).is_file()
+
+
+def read_flat_yaml_value(path, key):
+    """Read one top-level scalar key from a YAML file by line scan.
+
+    A deliberate line scan rather than a YAML parse: the whole point of this
+    script is that it runs with nothing installed, PyYAML included. Only used on
+    flat `key: value` scalars (paths), never on nested structures.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in content.splitlines():
+        if line[:1] in (" ", "\t"):
+            continue  # nested key; every key we want is top-level
+
+        stripped = line.strip()
+        if stripped.startswith("#") or ":" not in stripped:
+            continue
+        name, _, value = stripped.partition(":")
+        if name.strip() != key:
+            continue
+        value = value.split(" #")[0].strip().strip("'\"")
+        if value.lower() in ("", "null", "~", "none"):
+            return None
+        return value
+    return None
+
+
+def read_iris_config_artifact_dir(repo_root):
+    """artifact_dir from the IRIS clone's own config.yaml — if it describes THIS repo.
+
+    Covers the common case of a repo indexed by IRIS directly (`iris prepare`,
+    deploy.sh) rather than by this skill: the artifact path lives in the clone's
+    config.yaml and nothing else records it.
+
+    The codebase_dir guard is what makes this safe. That config describes one
+    project at a time, so its artifact_dir belongs to whatever codebase_dir names.
+    Reading it for a different repo would pair this cache with an unrelated
+    project's artifacts — a wrong answer dressed as a real one.
+    """
+    home = Path(os.environ.get("IRIS_HOME") or (Path.home() / ".iris"))
+    config_json = home / "config.json"
+    if not config_json.is_file():
+        return None
+    try:
+        data = json.loads(config_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    iris_repo = data.get("iris_repo") if isinstance(data, dict) else None
+    if not iris_repo:
+        return None
+
+    config_yaml = Path(iris_repo).expanduser() / "config.yaml"
+    described = read_flat_yaml_value(config_yaml, "codebase_dir")
+    if not described:
+        return None
+    try:
+        same_repo = Path(described).expanduser().resolve() == Path(repo_root).resolve()
+    except OSError:
+        return None
+    if not same_repo:
+        return None
+    return read_flat_yaml_value(config_yaml, "artifact_dir")
+
+
+def resolve_artifact_dir(repo_root, explicit=None):
+    """Locate the artifact directory this cache was built from.
+
+    Unlike codebase_dir, artifact_dir cannot be derived from the repo root — it
+    is an arbitrary path the user configured, often outside the repo. So it has
+    to be remembered, and the first source that names one wins:
+
+      1. --artifact-dir           explicit, always honoured
+      2. $IRIS_ARTIFACT_DIR       per-shell override
+      3. .iris_cache/iris_skill_config.yaml   written by iris_setup_lite.sh
+      4. the IRIS clone's config.yaml, but only when its codebase_dir is this
+         very repo — for repos indexed by IRIS itself rather than by this skill
+
+    Returns a dict with the path (or None), the source that supplied it, and
+    whether it exists on this machine. A configured path that does not exist is
+    normal for a committed cache: artifact_dir is absolute and machine-specific,
+    so a teammate's clone can query the artifact index without being able to
+    re-verify its freshness.
+    """
+    candidates = (
+        (explicit, "--artifact-dir"),
+        (os.environ.get("IRIS_ARTIFACT_DIR"), "IRIS_ARTIFACT_DIR"),
+        (
+            read_flat_yaml_value(
+                Path(repo_root) / ".iris_cache" / SKILL_CONFIG_NAME, "artifact_dir"
+            ),
+            f".iris_cache/{SKILL_CONFIG_NAME}",
+        ),
+        (read_iris_config_artifact_dir(repo_root), "IRIS config.yaml"),
+    )
+    for value, source in candidates:
+        if not value or not str(value).strip():
+            continue
+        raw = str(value).strip()
+        if raw == ARTIFACT_DIR_PLACEHOLDER:
+            continue
+        path = Path(raw).expanduser()
+        return {
+            "artifact_dir": str(path),
+            "artifact_dir_source": source,
+            "artifact_dir_exists": path.is_dir(),
+        }
+    return {
+        "artifact_dir": None,
+        "artifact_dir_source": None,
+        "artifact_dir_exists": False,
+    }
+
+
+def normalize_rel(path):
+    """Posix-form relative path, so Windows-written cache keys still compare."""
+    return str(path).replace("\\", "/")
+
+
+def collect_current_artifacts(artifact_dir):
+    """Relative posix paths of files IRIS's artifact discovery would index.
+
+    Mirrors iris/artifacts/artifact_discovery.py:discover_artifacts — supported
+    extensions only, Office lock files (`~$...`) skipped, oversized files
+    dropped. There is no ignore_patterns equivalent on the artifact side, and no
+    directory pruning: everything under artifact_dir is fair game.
+    """
+    root = Path(artifact_dir)
+    found = []
+    try:
+        entries = root.rglob("*")
+    except OSError:
+        return found
+    for path in entries:
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            continue
+        if path.name.startswith("~$"):
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in ARTIFACT_EXTENSIONS:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        limit = (
+            ARTIFACT_VIDEO_MAX_FILE_SIZE
+            if suffix in ARTIFACT_VIDEO_EXTENSIONS
+            else ARTIFACT_MAX_FILE_SIZE
+        )
+        if size > limit:
+            continue
+        found.append(normalize_rel(path.relative_to(root).as_posix()))
+    return sorted(found)
+
+
+def count_indexable_artifacts(artifact_dir):
+    """How many artifacts would be summarized under artifact_dir. Approximate."""
+    try:
+        return len(collect_current_artifacts(artifact_dir))
+    except OSError:
+        return 0
+
+
+def analyze_artifacts(artifact_dir, cached_hashes, detect_new=True):
+    """Drift between artifact_file_hashes.json and the artifact directory.
+
+    Same shape as analyze() for the codebase, so the caller can branch on both
+    with one set of rules.
+    """
+    artifact_root = Path(artifact_dir)
+    cached = {normalize_rel(k): v for k, v in cached_hashes.items()}
+
+    modified, deleted, unreadable = [], [], []
+    for rel_path, cached_hash in sorted(cached.items()):
+        full = artifact_root / rel_path
+        if not full.is_file():
+            deleted.append(rel_path)
+            continue
+        current_hash = hash_file_content(full)
+        if current_hash == "unreadable":
+            unreadable.append(rel_path)
+        elif current_hash != cached_hash:
+            modified.append(rel_path)
+
+    new = []
+    if detect_new:
+        new = sorted(
+            p for p in collect_current_artifacts(artifact_root) if p not in cached
+        )
+
+    tracked_count = len(cached)
+    drifted = len(modified) + len(deleted) + len(new)
+    ratio = (drifted / tracked_count) if tracked_count else 1.0
+
+    present = sum(1 for rel in list(cached)[:60] if (artifact_root / rel).exists())
+    sampled = min(len(cached), 60)
+    overlap = (present / sampled) if sampled else 1.0
+
+    return {
+        "artifact_dir": str(artifact_root),
+        "tracked_artifacts": tracked_count,
+        "new_artifacts": new,
+        "modified_artifacts": modified,
+        "deleted_artifacts": deleted,
+        "unreadable_artifacts": unreadable,
+        "drifted_artifacts": drifted,
+        "drift_ratio": round(ratio, 4),
+        "path_overlap": round(overlap, 3),
+        "dir_matches_index": overlap >= CACHE_MATCH_MIN_OVERLAP,
+        "new_artifact_detection": detect_new,
+    }
+
+
+def check_artifacts(
+    repo_root, cache_dir, explicit_dir=None, threshold=0.15, detect_new=True
+):
+    """Produce an artifact verdict for this cache. Never raises.
+
+    Artifact indexing is optional, so most outcomes here are informational
+    rather than problems: no index, or an index whose source directory is not
+    reachable from this machine, are both perfectly normal states.
+    """
+    result = {"verdict": "no_artifact_index"}
+    result.update(resolve_artifact_dir(repo_root, explicit_dir))
+
+    if not has_artifact_index(cache_dir):
+        # Nothing was ever indexed. If a directory IS configured, say how much
+        # is sitting there unindexed so the agent can offer to index it.
+        if result["artifact_dir_exists"]:
+            result["indexable_artifacts"] = count_indexable_artifacts(
+                result["artifact_dir"]
+            )
+        return result
+
+    cached_hashes = load_json_soft(Path(cache_dir) / ARTIFACT_HASHES_FILE)
+    overview = load_json_soft(Path(cache_dir) / ARTIFACT_OVERVIEW_FILE)
+    if isinstance(overview, dict):
+        result["indexed_artifacts"] = len(overview)
+
+    if not isinstance(cached_hashes, dict):
+        result["verdict"] = "artifact_index_unreadable"
+        return result
+    if not cached_hashes:
+        result["verdict"] = "empty_artifact_index"
+        return result
+
+    result["tracked_artifacts"] = len(cached_hashes)
+
+    if result["artifact_dir"] is None:
+        result["verdict"] = "artifact_dir_unknown"
+        return result
+    if not result["artifact_dir_exists"]:
+        result["verdict"] = "artifact_dir_missing"
+        return result
+
+    analysis = analyze_artifacts(
+        result["artifact_dir"], cached_hashes, detect_new=detect_new
+    )
+    result.update(analysis)
+
+    if not analysis["dir_matches_index"]:
+        result["verdict"] = "artifact_dir_mismatch"
+    elif analysis["drifted_artifacts"] == 0:
+        result["verdict"] = "fresh"
+    elif analysis["drift_ratio"] >= threshold:
+        result["verdict"] = "large_drift"
+    else:
+        result["verdict"] = "small_drift"
+    return result
+
+
+def render_artifacts(artifacts, threshold, limit):
+    """Human-readable artifact section, mirroring the codebase section."""
+    verdict = artifacts["verdict"]
+    lines = ["", "--- Artifacts (optional index) ---"]
+
+    if verdict == "no_artifact_index":
+        lines.append("ARTIFACT_VERDICT: no_artifact_index")
+        if artifacts.get("artifact_dir") and artifacts.get("artifact_dir_exists"):
+            lines.append(
+                f"artifact_dir is configured ({artifacts['artifact_dir']}, via "
+                f"{artifacts['artifact_dir_source']}) with "
+                f"~{artifacts.get('indexable_artifacts', 0)} indexable artifacts, "
+                "but they have never been indexed. Offer to index them (Task 2/3)."
+            )
+        else:
+            lines.append(
+                "This repo has no artifact index. Answer from the codebase index "
+                "alone and do not mention artifacts."
+            )
+        return "\n".join(lines)
+
+    if artifacts.get("artifact_dir"):
+        lines.append(
+            f"artifact_dir: {artifacts['artifact_dir']} "
+            f"(via {artifacts['artifact_dir_source']})"
+        )
+    if artifacts.get("indexed_artifacts") is not None:
+        lines.append(f"Indexed artifacts: {artifacts['indexed_artifacts']}")
+
+    if verdict in ("fresh", "small_drift", "large_drift", "artifact_dir_mismatch"):
+        lines.append(
+            f"Tracked artifacts: {artifacts['tracked_artifacts']} | "
+            f"drifted: {artifacts['drifted_artifacts']} "
+            f"({artifacts['drift_ratio'] * 100:.1f}%, threshold {threshold * 100:.0f}%)"
+        )
+    lines.append(f"ARTIFACT_VERDICT: {verdict}")
+
+    for label, key in (
+        ("Modified artifacts", "modified_artifacts"),
+        ("New artifacts", "new_artifacts"),
+        ("Deleted artifacts", "deleted_artifacts"),
+        ("Unreadable artifacts", "unreadable_artifacts"),
+    ):
+        paths = artifacts.get(key) or []
+        if not paths:
+            continue
+        lines.append(f"\n{label} ({len(paths)}):")
+        for path in paths[:limit]:
+            lines.append(f"  {path}")
+        if len(paths) > limit:
+            lines.append(f"  ... and {len(paths) - limit} more")
+
+    guidance = {
+        "fresh": "Artifact summaries match the artifact directory. Answer from "
+        "the artifact index as normal.",
+        "small_drift": "Answer from the artifact index, but for the artifacts "
+        "listed above read their extracted text under extracted_artifacts/ "
+        "instead of trusting the summary — and say the artifact index is "
+        "slightly stale.",
+        "large_drift": "The artifact index is substantially stale. Tell the "
+        "user, ask ONCE whether to refresh (Task 3), and answer this turn from "
+        "what is there, flagging it.",
+        "empty_artifact_index": "The artifact index tracks nothing — a failed or "
+        "interrupted run. Treat artifacts as unindexed.",
+        "artifact_index_unreadable": "artifact_file_hashes.json is missing or "
+        "corrupt. Use the artifact summaries with caution, or offer a refresh.",
+        "artifact_dir_unknown": "The artifact index exists but nothing records "
+        "where artifact_dir points, so freshness cannot be verified. Use the "
+        "index, say it is unverified, and pass --artifact-dir (or set "
+        "IRIS_ARTIFACT_DIR) if the user can name the path.",
+        "artifact_dir_missing": "The recorded artifact_dir does not exist here — "
+        "normal for a cache committed on someone else's machine. The artifact "
+        "index is still queryable; freshness just cannot be verified.",
+        "artifact_dir_mismatch": "Almost none of the indexed artifacts exist "
+        "under this artifact_dir, so it describes a different directory. Do not "
+        "report a drift figure; re-run with the correct --artifact-dir.",
+    }
+    if verdict in guidance:
+        lines.append("\n" + guidance[verdict])
+    if verdict in ("small_drift", "large_drift") and not artifacts.get(
+        "new_artifact_detection", True
+    ):
+        lines.append("(New-artifact detection was disabled.)")
+    return "\n".join(lines)
+
+
 def render(result, threshold, limit):
     lines = []
     verdict = result["verdict"]
@@ -729,6 +1164,11 @@ def render(result, threshold, limit):
         lines.append(
             "(New-file detection was disabled; counts cover tracked files only.)"
         )
+    if result.get("artifacts"):
+        # Two independent verdicts: VERDICT for code, ARTIFACT_VERDICT for
+        # artifacts. Label the first section so they cannot be confused.
+        lines.insert(0, "--- Codebase index ---")
+        lines.append(render_artifacts(result["artifacts"], threshold, limit))
     return "\n".join(lines)
 
 
@@ -761,6 +1201,17 @@ def main(argv=None):
         "--limit", type=int, default=25, help="Max paths listed per category"
     )
     parser.add_argument(
+        "--artifact-dir",
+        help="Artifact directory this cache was built from. Only needed when "
+        "the skill config does not record it (or records a path from another "
+        "machine); otherwise resolved automatically.",
+    )
+    parser.add_argument(
+        "--no-artifacts",
+        action="store_true",
+        help="Skip the artifact staleness check even when an artifact index exists",
+    )
+    parser.add_argument(
         "--list-repos",
         action="store_true",
         help="List indexed repos known to the registry, then exit",
@@ -785,8 +1236,14 @@ def main(argv=None):
             print(f"Indexed repos ({registry_path()}):\n")
             for entry in registry:
                 stamp = entry.get("indexed_at") or "unknown"
+                indexes = (
+                    "codebase + artifacts"
+                    if entry.get("has_artifact_index")
+                    else "codebase only"
+                )
                 print(
-                    f"  {entry['root']}\n      cache: {entry['cache']}\n      indexed: {stamp}"
+                    f"  {entry['root']}\n      cache: {entry['cache']}\n"
+                    f"      indexed: {stamp}\n      indexes: {indexes}"
                 )
         return 0
 
@@ -904,6 +1361,17 @@ def main(argv=None):
 
     result = analyze(repo_root, cache_dir, detect_new=not args.no_new)
 
+    # The artifact index is optional and independent: it gets its own verdict and
+    # never blocks the codebase answer.
+    if not args.no_artifacts:
+        result["artifacts"] = check_artifacts(
+            repo_root,
+            cache_dir,
+            explicit_dir=args.artifact_dir,
+            threshold=args.threshold,
+            detect_new=not args.no_new,
+        )
+
     if result["tracked_files"] == 0:
         # A cache that tracks no files cannot answer anything, even though
         # nothing "drifted" — treat it as unusable, not fresh.
@@ -919,6 +1387,9 @@ def main(argv=None):
     else:
         result["verdict"] = "small_drift"
 
+    artifacts = result.get("artifacts") or {}
+    artifact_verdict = artifacts.get("verdict")
+
     if args.json:
         print(json.dumps(result, indent=2))
     elif args.quiet:
@@ -928,13 +1399,25 @@ def main(argv=None):
             print("cache_mismatch (cache does not describe this directory)")
         else:
             print(f"{result['verdict']} ({result['drift_ratio'] * 100:.1f}% drift)")
+        if artifact_verdict:
+            if artifact_verdict in ("fresh", "small_drift", "large_drift"):
+                print(
+                    f"artifacts: {artifact_verdict} "
+                    f"({artifacts['drift_ratio'] * 100:.1f}% drift)"
+                )
+            else:
+                print(f"artifacts: {artifact_verdict}")
     else:
         print(render(result, args.threshold, args.limit))
 
-    if result["verdict"] == "fresh":
-        return 0
     if result["verdict"] in ("empty_cache", "cache_mismatch"):
         return 1  # unusable index, same class of problem as no cache at all
+    if result["verdict"] == "fresh":
+        # A fresh codebase index with a drifting artifact index is still stale
+        # overall — the agent needs to read those artifacts live.
+        if artifact_verdict in ("small_drift", "large_drift"):
+            return 2
+        return 0
     return 2
 
 

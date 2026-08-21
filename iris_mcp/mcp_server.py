@@ -5,9 +5,10 @@ MCP Server for IRIS - provides codebase context generation and agentic queries.
 """
 
 import argparse
+import json
 import logging
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -25,14 +26,31 @@ logger = logging.getLogger(__name__)
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+
+@contextmanager
+def _suppress_stdout():
+    """Temporarily redirect stdout to stderr to prevent print() from corrupting MCP protocol."""
+    old = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = old
+
+
 from iris.file_system.file_utils import (  # noqa: E402
     load_codebase_overview,
+)
+from iris.artifacts import resolve_artifact_dir  # noqa: E402
+from iris.generate_artifact_context import (  # noqa: E402
+    generate_artifact_context,
 )
 from iris.generate_context import generate_context  # noqa: E402
 from iris.agentic_chat import create_agent  # noqa: E402
 from iris.utils.utils import (  # noqa: E402
     construct_output_dir,
     get_ignore_patterns,
+    load_default_config,
     set_config_path,
 )
 
@@ -58,7 +76,11 @@ def get_enabled_tools():
         enabled_tools = config.get("mcp_enabled_tools", ["all"])
 
         # Validate tool names
-        valid_tools = {"all", "codebase_context", "codebase_query"}
+        valid_tools = {
+            "all",
+            "codebase_artifact_context",
+            "codebase_artifact_query",
+        }
         if not isinstance(enabled_tools, list):
             logger.warning(
                 f"Invalid mcp_enabled_tools type: {type(enabled_tools)}, using default"
@@ -127,153 +149,190 @@ def validate_file_within_codebase(file_path: str, codebase_root: Path) -> Path:
 
 
 # Define tool functions but don't register yet
-async def codebase_context(
-    codebase_dir: str = Field(
-        description="Directory to codebase for which iris should be run"
+async def codebase_artifact_context(
+    codebase_dir: str = Field(description="Directory to the codebase to index"),
+    artifact_dir: str = Field(
+        default="",
+        description="Directory containing project artifacts organized by phase (optional — falls back to artifact_dir in config, empty to skip artifact indexing)",
     ),
 ):
     """
-    Generate/update codebase context and provide it to the client.
+    Unified indexing tool: generates/updates both codebase and artifact indexes.
 
-    This tool:
-    1. Generates/updates codebase context using the orchestrator (no-op if unchanged)
-    2. Loads the codebase overview into memory
-    3. Returns a concise summary (use codebase_query to ask questions)
+    1. Runs codebase indexing via generate_context() (always)
+    2. Loads and returns the codebase overview
+    3. If artifact_dir is provided (or configured), runs artifact indexing via
+       generate_artifact_context()
 
     Args:
         codebase_dir: The codebase directory (absolute path)
+        artifact_dir: The project artifacts directory (absolute path, optional — falls back to config)
 
     Returns:
-        A concise summary of the generated context
+        Status summary with codebase overview and artifact indexing results
     """
     import asyncio
 
-    try:
-        # Validate path
-        validated_path = validate_codebase_path(codebase_dir)
-        codebase_dir = str(validated_path)
+    with _suppress_stdout():
+        try:
+            validated_path = validate_codebase_path(codebase_dir)
+            codebase_dir = str(validated_path)
 
-        # Get ignore patterns from config
-        ignore_patterns = get_ignore_patterns(codebase_dir=codebase_dir)
+            ignore_patterns = get_ignore_patterns(codebase_dir=codebase_dir)
+            output_dir = construct_output_dir(codebase_dir=codebase_dir)
 
-        output_dir = construct_output_dir(codebase_dir=codebase_dir)
+            logger.info(f"Generating codebase context for: {codebase_dir}")
+            codebase_result = await asyncio.to_thread(
+                generate_context,
+                codebase_dir=codebase_dir,
+                output_dir=output_dir,
+                ignore_patterns=ignore_patterns,
+                additional_context="",
+                verbose=True,
+            )
 
-        logger.info(f"Generating context for codebase: {codebase_dir}")
+            if codebase_result.status == "error":
+                return f"❌ Codebase indexing failed: {codebase_result.message}"
 
-        # Run blocking generate_context in a thread to keep event loop responsive
-        result = await asyncio.to_thread(
-            generate_context,
-            codebase_dir=codebase_dir,
-            output_dir=output_dir,
-            ignore_patterns=ignore_patterns,
-            additional_context="",
-            verbose=True,
-        )
+            codebase_overview = load_codebase_overview(output_dir)
+            num_files = len(codebase_overview) if codebase_overview else 0
 
-        if result.status == "error":
-            logger.error(f"Context generation failed: {result.message}")
-            return f"❌ Error generating codebase context: {result.message}"
+            summary_parts = [
+                f"✅ Codebase indexed: {num_files} files from {codebase_dir}",
+            ]
 
-        # Load the codebase context into memory
-        codebase_ctx = load_codebase_overview(output_dir)
+            # Resolve artifact_dir: parameter > config > skip
+            effective_artifact_dir = artifact_dir
+            if not effective_artifact_dir:
+                try:
+                    effective_artifact_dir = (
+                        resolve_artifact_dir(load_default_config()) or ""
+                    )
+                except Exception:
+                    effective_artifact_dir = ""
 
-        if not codebase_ctx:
-            logger.warning("No codebase context available")
-            return "❌ No codebase context available. The codebase may be empty or all files were ignored."
+            # Optionally index artifacts
+            if effective_artifact_dir:
+                try:
+                    validated_artifact = Path(effective_artifact_dir).resolve()
+                    if not validated_artifact.exists():
+                        summary_parts.append(
+                            f"⚠️ Artifact directory not found: {effective_artifact_dir}, skipping"
+                        )
+                    else:
+                        config = {}
+                        try:
+                            config = load_default_config()
+                        except Exception:
+                            pass
 
-        # Return concise summary to avoid exceeding MCP output limits
-        num_files = len(codebase_ctx)
-        file_list = list(codebase_ctx.keys())[:20]
-        more_files = max(0, num_files - 20)
+                        artifact_result = await asyncio.to_thread(
+                            generate_artifact_context,
+                            artifact_dir=str(validated_artifact),
+                            output_dir=output_dir,
+                            config=config,
+                            verbose=True,
+                        )
 
-        logger.info(f"Context generated successfully: {num_files} files")
+                        if artifact_result.status == "error":
+                            summary_parts.append(
+                                f"⚠️ Artifact indexing error: {artifact_result.message}"
+                            )
+                        elif artifact_result.status == "no_op":
+                            summary_parts.append(
+                                f"✅ Artifacts up to date ({artifact_result.total_artifacts or 0} total)"
+                            )
+                        else:
+                            count = len(artifact_result.processed_artifacts or [])
+                            summary_parts.append(
+                                f"✅ Artifacts indexed: {count} processed, "
+                                f"{artifact_result.total_artifacts or 0} total"
+                            )
+                except Exception as e:
+                    summary_parts.append(f"⚠️ Artifact indexing skipped: {e}")
+            else:
+                summary_parts.append(
+                    "ℹ️ No artifact_dir provided or configured, skipping artifact indexing"
+                )
 
-        context_summary = (
-            f"✅ Codebase context generated successfully!\n\n"
-            f"**Codebase**: {codebase_dir}\n"
-            f"**Files analyzed**: {num_files}\n"
-            f"**Files**: {', '.join(file_list)}"
-            f"{f' (and {more_files} more)' if more_files > 0 else ''}\n\n"
-            f"Context is indexed and ready. Use codebase_query to ask questions about this codebase."
-        )
+            if codebase_overview:
+                summary_parts.append(f"\n{json.dumps(codebase_overview, indent=2)}")
 
-        return context_summary
+            return "\n".join(summary_parts)
 
-    except ValueError as e:
-        logger.error(f"Path validation error: {e}")
-        return f"❌ Invalid path: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error in codebase_context: {str(e)}", exc_info=True)
-        return "❌ An internal error occurred in codebase_context. Check server logs for details."
+        except ValueError as e:
+            logger.error(f"Path validation error: {e}")
+            return f"❌ Invalid path: {str(e)}"
+        except Exception as e:
+            logger.error(f"Error in codebase_artifact_context: {str(e)}", exc_info=True)
+            return "❌ An internal error occurred in codebase_artifact_context. Check server logs for details."
 
 
-async def codebase_query(
+async def codebase_artifact_query(
     query: str = Field(
-        description="The question or task to evaluate against the codebase"
+        description="The question to evaluate against the codebase and/or project artifacts"
     ),
-    codebase_dir: str = Field(
-        description="Directory to codebase for which iris should be run"
+    codebase_dir: str = Field(description="Directory to codebase"),
+    artifact_dir: str = Field(
+        default="",
+        description="Directory containing project artifacts organized by phase (optional — falls back to artifact_dir in config, empty to skip artifact context)",
     ),
 ):
     """
-    End-to-end codebase query: runs the IRIS agent and returns its AI response.
+    Unified query tool: uses the orchestrator agent with retrieval tools
+    to answer questions about the codebase and/or project artifacts.
 
-    WARNING: This operation can take 30-60+ seconds for large codebases.
-    Consider using codebase_context first to pre-generate context.
-
-    This tool:
-    1. Requires codebase context to exist (run codebase_context first)
-    2. Processes the user query with the IRIS agent (file retrieval, code
-       search, and any configured tools)
-    3. Returns the AI-generated response
+    The orchestrator agent decides which retrieval tools to invoke:
+    - file_retrieval_agent for codebase questions
+    - artifact_retrieval_agent for artifact questions (when available)
+    - both when the query spans codebase and artifacts
 
     Args:
-        query: The question or task to evaluate against the codebase
+        query: The question about the codebase and/or project artifacts
         codebase_dir: The codebase directory (absolute path)
+        artifact_dir: The project artifacts directory (absolute path, optional — falls back to config)
 
     Returns:
-        AI-generated response to the query based on codebase analysis
+        AI-generated response with source attribution
     """
     import asyncio
 
     agent = None
-    try:
-        # Validate path
-        validated_path = validate_codebase_path(codebase_dir)
-        codebase_dir = str(validated_path)
+    with _suppress_stdout():
+        try:
+            validated_path = validate_codebase_path(codebase_dir)
+            codebase_dir = str(validated_path)
 
-        logger.info(f"Processing query: {query[:100]}...")
-        logger.info(f"Codebase: {codebase_dir}")
+            logger.info(f"Processing query: {query[:100]}...")
+            logger.info(f"Codebase: {codebase_dir}")
 
-        # Build the IRIS agent (blocking: boto3 session, prompt/tool loading).
-        # Run in a thread to keep the event loop responsive. A fresh agent is
-        # created per call since MCP tool invocations are independent.
-        logger.info("Creating agent...")
-        agent = await asyncio.to_thread(create_agent, codebase_dir=codebase_dir)
+            # create_agent() automatically includes artifact_retrieval_agent
+            # when artifact_dir is configured or artifact_overview.json exists
+            agent = await asyncio.to_thread(create_agent, codebase_dir=codebase_dir)
 
-        # Stream the response and collect the text chunks.
-        logger.info("Generating response...")
-        response_parts = []
-        async for event in agent.stream_async(query):
-            if "data" in event:
-                response_parts.append(event["data"])
+            # Stream the response and collect the text chunks.
+            logger.info("Generating response...")
+            response_parts = []
+            async for event in agent.stream_async(query):
+                if "data" in event:
+                    response_parts.append(event["data"])
 
-        logger.info("Response generated successfully")
-        return "".join(response_parts)
+            logger.info("Response generated successfully")
+            return "".join(response_parts)
 
-    except ValueError as e:
-        logger.error(f"Path validation error: {e}")
-        return f"❌ Invalid path: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error in codebase_query: {str(e)}", exc_info=True)
-        return "❌ An internal error occurred in codebase_query. Check server logs for details."
-    finally:
-        # Release any MCP tool clients held by the agent's tool registry.
-        if agent is not None and hasattr(agent, "tool_registry"):
-            try:
-                agent.tool_registry.cleanup()
-            except Exception as cleanup_err:
-                logger.debug(f"Agent cleanup error (ignored): {cleanup_err}")
+        except ValueError as e:
+            logger.error(f"Path validation error: {e}")
+            return f"❌ Invalid path: {str(e)}"
+        except Exception as e:
+            logger.error(f"Error in codebase_artifact_query: {str(e)}", exc_info=True)
+            return "❌ An internal error occurred in codebase_artifact_query. Check server logs for details."
+        finally:
+            # Release any MCP tool clients held by the agent's tool registry.
+            if agent is not None and hasattr(agent, "tool_registry"):
+                try:
+                    agent.tool_registry.cleanup()
+                except Exception as cleanup_err:
+                    logger.debug(f"Agent cleanup error (ignored): {cleanup_err}")
 
 
 def main():
@@ -291,11 +350,11 @@ def main():
     enabled_tools = get_enabled_tools()
     logger.info(f"Enabled tools: {enabled_tools}")
 
-    if is_tool_enabled("codebase_context", enabled_tools):
-        mcp.tool()(codebase_context)
+    if is_tool_enabled("codebase_artifact_context", enabled_tools):
+        mcp.tool()(codebase_artifact_context)
 
-    if is_tool_enabled("codebase_query", enabled_tools):
-        mcp.tool()(codebase_query)
+    if is_tool_enabled("codebase_artifact_query", enabled_tools):
+        mcp.tool()(codebase_artifact_query)
 
     try:
         mcp.run()

@@ -1,27 +1,39 @@
 # IRIS Query — Reference
 
-Supporting detail for the `iris-query` skill: cache layout, the overview JSON
-schema, troubleshooting, and configuration notes. SKILL.md is the workflow; this
+Supporting detail for the `iris-query` skill: cache layout, both overview JSON
+schemas, troubleshooting, and configuration notes. SKILL.md is the workflow; this
 is the lookup table.
 
 ## Cache layout
 
 IRIS writes its index to `<output_dir>/<codebase-folder-name>/`, where
-`output_dir` defaults to `.iris_cache` relative to the indexed repo:
+`output_dir` defaults to `.iris_cache` relative to the indexed repo. The
+artifact files appear only when `artifact_dir` was configured and indexed:
 
 ```
 <repo-root>/
 ├── .iris_cache/
 │   ├── iris_skill_config.yaml      # written by iris_setup_lite.sh (not by IRIS itself)
 │   └── <folder-name-at-index-time>/
-│       ├── codebase_overview.json  # per-file LLM summaries — the index
+│       ├── codebase_overview.json  # per-file LLM summaries — the codebase index
 │       ├── file_hashes.json        # relative path -> SHA-256, drives change detection
 │       ├── codebase_metadata.json  # {"evaluation_timestamp": ISO-8601}
 │       ├── file_paths.txt          # newline-separated indexed paths
 │       ├── tree.txt                # ASCII directory tree, rooted at the folder name
+│       ├── artifact_overview.json      # optional: per-artifact LLM summaries
+│       ├── artifact_file_hashes.json   # optional: artifact-relative path -> SHA-256
+│       ├── artifact_file_paths.txt     # optional: discovered artifact paths
+│       ├── artifact_tree.txt           # optional: artifact directory tree
+│       ├── extracted_artifacts/        # optional: extracted TEXT, the retrieval source
+│       │   └── <phase>/<type>/<name>.<ext>.md
+│       ├── knowledge_base.md           # optional: whole corpus assembled for humans
 │       ├── conversation_history.json  # IRIS chat/MCP history; unused by this skill
 │       └── logs/                   # per-run indexing logs
 ```
+
+Both indexes share one cache directory, and that directory is named after the
+*codebase* folder. There is no separate artifact cache: `artifact_dir` supplies
+the content, `codebase_dir` decides where the results land.
 
 **The subdirectory name is a trap.** It comes from the folder name *at index
 time* (`utils.py: construct_output_dir` uses `Path(codebase_dir).name`). Clone
@@ -42,10 +54,18 @@ The cache is portable as committed. Every key in `file_hashes.json`,
 `tree.txt` is display-only; metadata is a timestamp. Nothing needs rewriting
 after a clone, a rename, or a move — on the **query** path.
 
-The only absolute paths live in config files (`codebase_dir`, `context_file`).
-That is why the **regeneration** path must always re-derive `codebase_dir` from
-the current repo root, and why `iris_setup_lite.sh` rewrites it on every run
-rather than trusting a committed value.
+The artifact files are portable in the same way, with one asymmetry worth
+knowing: artifact keys are relative to `artifact_dir`, and `extracted_artifacts/`
+carries the artifact *text* inside the cache. So a teammate who clones a
+committed cache can fully query artifacts — summaries and content — without ever
+having the artifact directory. What they cannot do is verify freshness or refresh,
+because those need the source files.
+
+The only absolute paths live in config files (`codebase_dir`, `artifact_dir`,
+`context_file`). That is why the **regeneration** path must always re-derive
+`codebase_dir` from the current repo root, and why `iris_setup_lite.sh` rewrites
+it on every run rather than trusting a committed value. `artifact_dir` is the
+exception that cannot be derived — see "Artifact directory resolution".
 
 ## `codebase_overview.json` schema
 
@@ -94,7 +114,73 @@ Notes that matter when reasoning over this data:
 - Summaries are generated per file with no cross-file review, so two entries can
   describe the same interaction inconsistently. The live code settles it.
 
+## `artifact_overview.json` schema (optional index)
+
+A flat JSON object: artifact path *relative to `artifact_dir`* → summary entry.
+One entry per successfully indexed artifact.
+
+```json
+{
+  "during-project/reports/MedAgents_Cost_Analysis.xlsx": {
+    "purpose": "Analyze and optimize the cost of using AWS Bedrock and Claude models…",
+    "source_material_type": "reports",
+    "project_phase": "during-project",
+    "file_format": "xlsx",
+    "key_topics": ["Bedrock pricing", "token costs", "optimization"],
+    "related_artifacts": [],
+    "summary": "Cost analysis covering per-token pricing, projected monthly spend…"
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `purpose` | string | One-line reason the artifact exists. Main search target. |
+| `summary` | string | Longer prose summary of the content. |
+| `key_topics` | list of strings | Topics pulled out by the LLM; searchable. |
+| `project_phase` | string | `pre-project` / `during-project` / `post-project` / `unclassified` |
+| `source_material_type` | string | `meetings`, `presentations`, `reports`, `design_docs`, `readouts`, `technical_docs`, `roadmap`, `production_readiness`, `constraints`, `unclassified` |
+| `file_format` | string | Bare extension: `pptx`, `docx`, `xlsx`, `pdf`, `md`, `txt`, `mp4`, `mov`, `avi`, `mkv` |
+| `related_artifacts` | list of strings | LLM's guess at related artifacts. A hint, not a guarantee. |
+
+`project_phase` and `source_material_type` come from the **folder layout**, not
+from content: `artifact_discovery._classify_path` matches the first two path
+components against a known phase/type map, and anything else is `unclassified`.
+An `unclassified` artifact is still fully indexed — it just was not filed in the
+recommended structure.
+
+### Extracted text — the artifact retrieval source
+
+`extracted_artifacts/<artifact path>.md` holds the text pulled out of each
+artifact, with a small YAML header (`source`, `project_phase`,
+`source_material_type`, `file_format`). Note `.md` is appended to the *full*
+filename, extension included (`report.pdf` → `report.pdf.md`), so two artifacts
+with the same stem cannot collide.
+
+This is what to read before quoting anything. A summary is a paraphrase of a
+paraphrase; the extracted text is the artifact's own words.
+
+Extraction quality varies by format, and knowing the failure modes prevents
+wrong conclusions:
+
+| Format | Extracted | Watch for |
+|---|---|---|
+| `.pptx` | slide text + speaker notes | layout and images are lost; a diagram-only slide extracts as almost nothing |
+| `.docx` | paragraph text | tables flatten |
+| `.xlsx` | every sheet, row by row | formulas appear as values only |
+| `.pdf` | text via pdfplumber | image-only pages need `artifact_ocr_enabled`; without it they are skipped with a warning |
+| `.md`, `.txt` | verbatim | — |
+| video | Transcribe transcript + keyframe analysis | **only when `artifact_transcription_enabled`** — otherwise metadata only, so an "empty" meeting recording usually means transcription was off, not that nothing was said |
+
+`knowledge_base.md` is every extracted artifact concatenated, grouped by phase
+and type. It exists for human review and report generation. Do not load it for
+retrieval — it is the whole corpus in one file.
+
 ## Change detection
+
+Both indexes use the same mechanism, over separate hash files. `check_staleness.py`
+runs the codebase check always and the artifact check whenever the cache contains
+an artifact index, reporting `VERDICT` and `ARTIFACT_VERDICT` independently.
 
 `file_hashes.json` maps relative path → SHA-256 of file bytes
 (`hashlib.sha256(content).hexdigest()`, per
@@ -119,6 +205,77 @@ Drift ratio = (modified + deleted + new) ÷ tracked files. Default threshold for
 | `ambiguous_repo` | 1 | Several repos registered, working dir inside none of them |
 | `small_drift` | 2 | Drift below threshold; read the listed files live |
 | `large_drift` | 2 | Drift at or above threshold; offer a refresh, answer live this turn |
+
+### Artifact drift
+
+`artifact_file_hashes.json` maps **artifact_dir-relative** path → SHA-256, and is
+compared exactly the same way. New-artifact detection mirrors
+`artifact_discovery.discover_artifacts` rather than the codebase walk: supported
+extensions only, Office lock files (`~$…`) skipped, files over
+`artifact_max_file_size` (30 MB) or `artifact_video_max_file_size` (300 MB)
+dropped. There are no `ignore_patterns` on the artifact side.
+
+`ARTIFACT_VERDICT` values, and what each one means for an answer:
+
+| Artifact verdict | Meaning |
+|---|---|
+| `no_artifact_index` | No artifact index in this cache. The normal state for a code-only repo — not an error, and not worth mentioning to the user unless they asked about artifacts |
+| `fresh` | Artifact summaries match the artifact directory |
+| `small_drift` | Below threshold; read the listed artifacts' extracted text instead of their summaries |
+| `large_drift` | At or above threshold; offer a refresh, answer flagged this turn |
+| `artifact_dir_unknown` | Index exists, but nothing records where `artifact_dir` points, so freshness is unverifiable. The index is still usable |
+| `artifact_dir_missing` | The recorded `artifact_dir` does not exist here — normal for a cache committed on another machine. Index still usable |
+| `artifact_dir_mismatch` | The directory checked is not the one the index describes (overlap below 25%, same test as `cache_belongs_to_repo`). Do not report a drift figure |
+| `empty_artifact_index` | Hash file tracks nothing — failed or interrupted run |
+| `artifact_index_unreadable` | `artifact_file_hashes.json` missing or corrupt |
+
+Exit codes stay driven by the codebase verdict, with one addition: a `fresh`
+codebase paired with artifact `small_drift`/`large_drift` exits 2, because the
+cache as a whole is stale. Artifact states that merely prevent *verification*
+(`artifact_dir_unknown`, `artifact_dir_missing`, `no_artifact_index`) never change
+the exit code — artifacts are optional, and an optional index must not turn a good
+codebase answer into a failure. Pass `--no-artifacts` to skip the artifact check.
+
+### Artifact directory resolution
+
+`artifact_dir` is the one path in the system that cannot be derived. `codebase_dir`
+is just the repo root; `artifact_dir` is wherever the user keeps project material,
+usually outside the repo entirely. So it is resolved from, in order:
+
+| # | Source | Notes |
+|---|---|---|
+| 1 | `--artifact-dir` | Explicit always wins. `iris_setup_lite.sh` exits 1 if the path does not exist, rather than indexing nothing and looking successful |
+| 2 | `$IRIS_ARTIFACT_DIR` | Per-shell override |
+| 3 | `.iris_cache/iris_skill_config.yaml` → `artifact_dir` | Written by `iris_setup_lite.sh` on every indexing run. The normal path after first setup |
+| 4 | `<iris_repo>/config.yaml` → `artifact_dir` | Only when that config's `codebase_dir` resolves to **this** repo. Covers repos indexed by IRIS directly (`iris prepare`, `deploy.sh`), where the path exists nowhere else. `iris_repo` comes from `~/.iris/config.json` |
+| — | Otherwise | Codebase only when indexing; "unverified" when checking staleness |
+
+The `codebase_dir` guard on step 4 is load-bearing. IRIS's `config.yaml` describes
+one project at a time, so its `artifact_dir` belongs to whatever `codebase_dir`
+names; reading it for any other repo would pair this cache with an unrelated
+project's artifacts, which reads as a real answer rather than an error.
+
+A named directory that does not exist is handled by who named it: an explicit
+`--artifact-dir`/`$IRIS_ARTIFACT_DIR` fails the indexing run (a typo should not
+look like success), while a *recorded* path that is unreachable degrades to
+codebase-only with a warning (the expected state after cloning someone else's
+cache, and no reason to block a codebase refresh). `--check` never fails on
+either; it reports.
+
+The template placeholder `/path/to/your/artifacts`, blank values, and `null` all
+count as "not configured" — matching `iris/artifacts/__init__.py:resolve_artifact_dir`.
+
+`iris_setup_lite.sh` writes the key **explicitly on every run**, as a path or as
+`artifact_dir: null`. The null is not redundant: the skill config is merged *over*
+the IRIS clone's `config.yaml`, so omitting the key would inherit whatever
+`artifact_dir` that config names and index an unrelated directory's artifacts into
+this repo's cache. For the same reason the script passes an explicit
+`mode="both"`/`mode="codebase"` to `index_codebase_artifacts` rather than letting
+the merged config decide.
+
+Both scripts read the skill config with a line scan rather than a YAML parse, for
+the same reason `~/.iris/config.json` is read with `sed` and not `jq`: the query
+path must work on a machine with nothing installed.
 
 ## Install scope and repo resolution
 
@@ -348,11 +505,11 @@ running IRIS itself.
 
 ## Why the skill reads the index instead of calling the MCP server
 
-IRIS ships an MCP server with a `codebase_query` tool. This skill deliberately
-does not use it for Q&A:
+IRIS ships an MCP server with a `codebase_artifact_query` tool. This skill
+deliberately does not use it for Q&A:
 
-- **Cost.** `codebase_query` runs its own LLM agent, so the assistant pays for a
-  second model to answer a question it could answer itself.
+- **Cost.** `codebase_artifact_query` runs its own LLM agent, so the assistant
+  pays for a second model to answer a question it could answer itself.
 - **Lost context.** That agent doesn't see the conversation — what the user
   already asked, already rejected, or is editing right now.
 - **Credentials.** It needs AWS access at question time. Reading the cache needs
@@ -368,6 +525,7 @@ and for IRIS's own chat and UI surfaces.
 |---|---|
 | `IRIS_AUTO_PREPARE=1` | Permits refresh on `large_drift` without asking. Default off. |
 | `IRIS_PYTHON` | Interpreter `iris_setup_lite.sh` should use. Same as `--python`. |
+| `IRIS_ARTIFACT_DIR` | Artifact directory for staleness checks and indexing. Same as `--artifact-dir`, and outranked by it. |
 | `IRIS_HOME` | Directory for `config.json` and `indexed_repos.json`. Default `~/.iris`. |
 | `AWS_PROFILE` / `AWS_ACCESS_KEY_ID` … | Standard AWS credential resolution, used only when indexing. |
 
@@ -387,6 +545,13 @@ and for IRIS's own chat and UI surfaces.
 | Cache appears out of date right after indexing | Files changed during the run, or the run partially failed | Re-run indexing; check `.iris_cache/<name>/logs/` for the failing file |
 | `No codebase overview available` (from the MCP server) | Index missing for the path that server was configured with | Run indexing for that codebase; verify the server's `codebase_dir` |
 | Question-relevant files are absent from the index | Excluded by `ignore_patterns`, or over `max_file_size` (2 MB) | Expected. Use Grep/Read for those files |
+| `No .iris_cache/*/artifact_overview.json under this repo` | Artifacts were never indexed — the normal state, since they are opt-in | Answer from the codebase. Offer artifact indexing only if the question needs project context and the user has an artifact folder |
+| `ARTIFACT_VERDICT: artifact_dir_unknown` | The cache carries an artifact index but nothing records the source directory (common with a cache indexed by IRIS's own `config.yaml` rather than by this skill) | Query it anyway and say freshness is unverified; re-run with `--artifact-dir <path>` if the user can name it |
+| `ARTIFACT_VERDICT: artifact_dir_missing` | Recorded `artifact_dir` is another machine's absolute path | Expected for a committed cache. Re-point with `--artifact-dir` only when a refresh is wanted |
+| `Artifact directory does not exist: …` (exit 1 from setup) | Typo, or a path that moved | Pass the real path, or `--no-artifacts` to index code only |
+| `artifact status: skipped` during indexing | IRIS resolved no usable `artifact_dir` — the path exists but holds no supported formats | Check the folder contents against the supported list (pptx/docx/xlsx/pdf/md/txt/video) |
+| An artifact is indexed but its extracted text is nearly empty | Image-only PDF with OCR disabled, a diagram-only slide deck, or a video with transcription disabled | Enable `artifact_ocr_enabled` / `artifact_transcription_enabled` in `config.yaml` and reindex, or treat the artifact as unavailable |
+| Artifact summaries exist for files the user deleted | Deleted artifacts stay in the overview until a refresh | Reported as `deleted_artifacts` by the staleness check; refresh to clear |
 
 ## Keeping a committed cache fresh
 
@@ -421,6 +586,11 @@ Useful when verifying this skill's behaviour against IRIS itself:
 | `iris/file_system/file_utils.py` | `hash_file_content`, cache load/save, `collect_files` |
 | `iris/file_system/cache_manager.py` | Change detection and cache-consistency logic |
 | `iris/utils/utils.py` | `construct_output_dir` (the folder-name behaviour), config merge |
-| `iris/api.py` | `index_codebase(config_path=…)`, the entry point the setup script drives |
-| `iris/cli.py` | `iris prepare` / `iris chat` CLI surface |
-| `config_template.yaml` | Model configuration, `ignore_patterns`, size limits |
+| `iris/api.py` | `index_codebase_artifacts(config_path=…, mode=…)`, the entry point the setup script drives |
+| `iris/cli.py` | `iris prepare` (`--code` / `--artifact`) / `iris chat` CLI surface |
+| `config_template.yaml` | Model configuration, `ignore_patterns`, size limits, every `artifact_*` option |
+| `iris/artifacts/__init__.py` | `ARTIFACT_FORMATS` (the authoritative format list), `resolve_artifact_dir`, folder-classification map |
+| `iris/artifacts/artifact_discovery.py` | Which files become artifacts, and how phase/type are assigned |
+| `iris/artifacts/knowledge_base.py` | `extracted_artifacts/` naming and `knowledge_base.md` assembly |
+| `iris/generate_artifact_context.py` | The artifact pipeline end to end |
+| `docs/artifact-indexing.md` | Feature-level documentation for artifact indexing |

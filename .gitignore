@@ -144,3 +144,6 @@ IAC/
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+
+# Claude mcp server config file
+.mcp.json

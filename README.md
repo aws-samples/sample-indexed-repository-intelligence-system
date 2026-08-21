@@ -12,6 +12,7 @@ IRIS offers CLI and UI interfaces in both local and deployed configurations. Use
 IRIS provides:
 
 - **Automatic codebase summarization**
+- **Project artifact indexing and QA** (PPTX, DOCX, XLSX, PDF, MD, TXT, video)
 - **Intelligent file selection based on user queries**
 - **Multi-turn conversation support**
 - **Prompt caching for improved performance**
@@ -98,8 +99,14 @@ iris ui
 # Launch legacy Streamlit interface (will be sunset in future versions)
 iris streamlit
 
-# Generate/update codebase context (preparation step)
+# Generate/update codebase + artifact context (preparation step)
 iris prepare
+
+# Generate/update codebase context only
+iris prepare --code
+
+# Generate/update project artifact context only
+iris prepare --artifact
 ```
 
 ## Additional Documentation
@@ -185,6 +192,21 @@ Complete MCP integration coverage:
 - Custom client integration
 
 For the reverse direction — configuring IRIS to **consume** external MCP servers (AWS Documentation, Bedrock AgentCore, Strands) — see [Consuming External MCP Servers](docs/mcp-integration.md).
+
+### 📂 [Project Artifact Indexing and QA](docs/artifact-indexing.md)
+
+**Indexing and querying project artifacts alongside code**
+
+**Start here if you're:** Setting up artifact indexing for project documents, presentations, and reports, or understanding how the artifact QA pipeline works.
+
+Comprehensive artifact feature coverage:
+
+- Supported file formats and folder structure
+- Indexing pipeline (discovery, extraction, summarization)
+- Artifact selection and retrieval
+- CLI, API, and MCP usage
+- Configuration options and tuning
+- Architecture and error handling
 
 ### 👥 [User Management](docs/user-management.md)
 

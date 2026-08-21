@@ -44,20 +44,24 @@ The MCP server is implemented in `iris_mcp/mcp_server.py` and registered as a co
 
 ### Available Tools
 
-#### 1. codebase_query
+The server exposes two tools. Both cover the codebase and, when an artifact
+directory is configured, project artifacts alongside it.
 
-**Description**: End-to-end codebase query — generates context if needed and returns an AI response. This operation can take 30-60+ seconds for large codebases.
+#### 1. codebase_artifact_query
+
+**Description**: Answers a question using the orchestrator agent, which decides which retrieval tools to invoke — `file_retrieval_agent` for codebase questions, `artifact_retrieval_agent` for artifact questions, or both when the query spans the two. Responses include source attribution. This operation can take 30-60+ seconds for large codebases.
 
 **Parameters**:
 
-- `query` (string, required): The question or task to evaluate against the codebase
+- `query` (string, required): The question to evaluate against the codebase and/or project artifacts
 - `codebase_dir` (string, required): The codebase directory (absolute path)
+- `artifact_dir` (string, optional): The project artifacts directory (absolute path). Falls back to `artifact_dir` in `config.yaml`; leave empty to skip artifact context.
 
 **Usage**:
 
 ```json
 {
-  "name": "codebase_query",
+  "name": "codebase_artifact_query",
   "arguments": {
     "query": "What does this codebase do and how is it structured?",
     "codebase_dir": "/path/to/your/codebase"
@@ -69,21 +73,23 @@ The MCP server is implemented in `iris_mcp/mcp_server.py` and registered as a co
 
 - Intelligent file selection based on query relevance
 - Comprehensive codebase analysis
-- Context-aware responses
+- Artifact retrieval when artifacts are indexed
+- Context-aware responses with source attribution
 
-#### 2. codebase_context
+#### 2. codebase_artifact_context
 
-**Description**: Generate or update codebase context and provide it to the client. Consider using this first to pre-generate context before running queries.
+**Description**: Generates or updates the codebase index, and the artifact index when an artifact directory is provided or configured. Run this before querying to pre-generate context.
 
 **Parameters**:
 
 - `codebase_dir` (string, required): The codebase directory (absolute path)
+- `artifact_dir` (string, optional): The project artifacts directory (absolute path). Falls back to `artifact_dir` in `config.yaml`; leave empty to skip artifact indexing.
 
 **Usage**:
 
 ```json
 {
-  "name": "codebase_context",
+  "name": "codebase_artifact_context",
   "arguments": {
     "codebase_dir": "/path/to/your/codebase"
   }
@@ -94,6 +100,7 @@ The MCP server is implemented in `iris_mcp/mcp_server.py` and registered as a co
 
 - Generate comprehensive codebase overview
 - Update existing context with file changes
+- Index project artifacts by phase when configured
 - Provide structured codebase information
 - File relationship mapping
 
@@ -103,18 +110,19 @@ Tools can be selectively enabled via the `mcp_enabled_tools` setting in `config.
 
 ```yaml
 # MCP Server: List of tools to enable (default: all)
-# Options: "all", "codebase_context", "codebase_query"
+# Options: "all", "codebase_artifact_context", "codebase_artifact_query"
 mcp_enabled_tools:
   - all
 ```
 
-To enable only specific tools:
+To enable only a specific tool:
 
 ```yaml
 mcp_enabled_tools:
-  - codebase_context
-  - codebase_query
+  - codebase_artifact_context
 ```
+
+Both tools index and query project artifacts alongside the codebase. See [artifact-indexing.md](artifact-indexing.md) for details on how artifacts are organized and indexed.
 
 ### Server Configuration
 
@@ -160,13 +168,13 @@ Create or edit your Cline MCP configuration file:
 {
   "mcpServers": {
     "iris-server": {
-      "command": "/path/to/your/venv/bin/python",
-      "timeout": 600,
-      "args": ["/path/to/iris/iris_mcp/mcp_server.py"],
+      "command": "bash",
+      "timeout": 600000,
+      "args": ["-c", "source /path/to/your/venv/bin/activate && python /path/to/iris/iris_mcp/mcp_server.py"],
       "env": {
         "AWS_PROFILE": "your-aws-profile-name"
       },
-      "alwaysAllow": ["codebase_query", "codebase_context"],
+      "alwaysAllow": ["codebase_artifact_query", "codebase_artifact_context"],
       "disabled": false
     }
   }
@@ -179,15 +187,15 @@ Create or edit your Cline MCP configuration file:
 {
   "mcpServers": {
     "iris-server": {
-      "command": "/path/to/your/venv/bin/python",
-      "timeout": 600,
-      "args": ["/path/to/iris/iris_mcp/mcp_server.py"],
+      "command": "bash",
+      "timeout": 600000,
+      "args": ["-c", "source /path/to/your/venv/bin/activate && python /path/to/iris/iris_mcp/mcp_server.py"],
       "env": {
         "AWS_ACCESS_KEY_ID": "<your-access-key-id>",
         "AWS_SECRET_ACCESS_KEY": "<your-secret-access-key>",
         "AWS_SESSION_TOKEN": "<your-session-token>"
       },
-      "alwaysAllow": ["codebase_query", "codebase_context"],
+      "alwaysAllow": ["codebase_artifact_query", "codebase_artifact_context"],
       "disabled": false
     }
   }
@@ -225,7 +233,7 @@ Create or edit your Cline MCP configuration file:
    In Cline, enter:
 
    ```
-   use codebase_query to analyze: What does this codebase do?
+   use codebase_artifact_query to analyze: What does this codebase do?
    ```
 
    You should see the tool run and return a summary of the codebase.
@@ -252,11 +260,13 @@ Create or edit `~/.kiro/settings/mcp.json` (use `.kiro/settings/mcp.json` in a p
 {
   "mcpServers": {
     "iris-server": {
-      "command": "/path/to/your/venv/bin/python",
-      "args": ["/path/to/iris/iris_mcp/mcp_server.py"],
+      "command": "bash",
+      "timeout": 600000,
+      "args": ["-c", "source /path/to/your/venv/bin/activate && python /path/to/iris/iris_mcp/mcp_server.py"],
       "env": {
         "AWS_PROFILE": "your-aws-profile-name"
-      }
+      },
+      "disabled": false
     }
   }
 }
@@ -286,7 +296,7 @@ Set appropriate timeouts for complex codebase analysis:
 ```json
 {
   "timeout": 600,
-  "alwaysAllow": ["codebase_query", "codebase_context"]
+  "alwaysAllow": ["codebase_artifact_query", "codebase_artifact_context"]
 }
 ```
 
@@ -296,7 +306,7 @@ For enhanced security, limit tool access:
 
 ```json
 {
-  "alwaysAllow": ["codebase_query"],
+  "alwaysAllow": ["codebase_artifact_query"],
   "disabled": false,
   "autoApprove": []
 }
@@ -307,7 +317,7 @@ For enhanced security, limit tool access:
 ### Basic Codebase Analysis
 
 ```
-use codebase_query to answer: What does this codebase do?
+use codebase_artifact_query to answer: What does this codebase do?
 ```
 
 **Expected Response**:
@@ -320,7 +330,7 @@ use codebase_query to answer: What does this codebase do?
 ### Specific Feature Analysis
 
 ```
-use codebase_query to analyze: How does the authentication system work?
+use codebase_artifact_query to analyze: How does the authentication system work?
 ```
 
 **Expected Response**:
@@ -333,7 +343,7 @@ use codebase_query to analyze: How does the authentication system work?
 ### Code Structure Investigation
 
 ```
-use codebase_query to explain: How is the project structured and what are the main modules?
+use codebase_artifact_query to explain: How is the project structured and what are the main modules?
 ```
 
 **Expected Response**:
@@ -346,7 +356,7 @@ use codebase_query to explain: How is the project structured and what are the ma
 ### Debugging Assistance
 
 ```
-use codebase_query to help: I'm getting an error in the user login flow. Can you help me understand how it works?
+use codebase_artifact_query to help: I'm getting an error in the user login flow. Can you help me understand how it works?
 ```
 
 **Expected Response**:
@@ -359,7 +369,7 @@ use codebase_query to help: I'm getting an error in the user login flow. Can you
 ### Documentation Generation
 
 ```
-use codebase_query to create: Generate documentation for the API endpoints in this codebase
+use codebase_artifact_query to create: Generate documentation for the API endpoints in this codebase
 ```
 
 **Expected Response**:
@@ -372,7 +382,7 @@ use codebase_query to create: Generate documentation for the API endpoints in th
 ### Context Generation
 
 ```
-use codebase_context to generate a comprehensive overview of this codebase
+use codebase_artifact_context to generate a comprehensive overview of this codebase
 ```
 
 **Expected Response**:
@@ -381,6 +391,7 @@ use codebase_context to generate a comprehensive overview of this codebase
 - File summaries and relationships
 - Directory tree structure
 - Technology stack analysis
+- Artifact indexing status when an artifact directory is configured
 
 ## Advanced Features
 
@@ -395,15 +406,15 @@ Create a `.clinerules` file to define custom workflows:
 
 When analyzing a new codebase:
 
-1. First use `codebase_context` to understand the overall structure
-2. Then use `codebase_query` for specific questions
+1. First use `codebase_artifact_context` to understand the overall structure
+2. Then use `codebase_artifact_query` for specific questions
 3. Always provide code examples when explaining functionality
 
 ## Documentation Workflow
 
 When generating documentation:
 
-1. Use `codebase_query` to understand the component
+1. Use `codebase_artifact_query` to understand the component
 2. Generate comprehensive documentation with examples
 3. Include usage patterns and best practices
 
@@ -411,7 +422,7 @@ When generating documentation:
 
 When debugging issues:
 
-1. Use `codebase_query` to understand the relevant code flow
+1. Use `codebase_artifact_query` to understand the relevant code flow
 2. Identify potential error sources
 3. Suggest specific debugging steps and tools
 ```
@@ -422,13 +433,13 @@ The MCP server supports multi-turn conversations for complex analysis:
 
 ```
 # Turn 1
-use codebase_query to analyze: What are the main components of this system?
+use codebase_artifact_query to analyze: What are the main components of this system?
 
 # Turn 2 (building on previous context)
-use codebase_query to explain: How do these components interact with each other?
+use codebase_artifact_query to explain: How do these components interact with each other?
 
 # Turn 3 (continuing the conversation)
-use codebase_query to identify: What are potential scalability bottlenecks in this architecture?
+use codebase_artifact_query to identify: What are potential scalability bottlenecks in this architecture?
 ```
 
 ## Troubleshooting
@@ -628,7 +639,7 @@ if is_tool_enabled("my_new_tool", enabled_tools):
 Remember to add the new tool name to the valid set in `get_enabled_tools()`:
 
 ```python
-valid_tools = {"all", "codebase_context", "codebase_query", "my_new_tool"}
+valid_tools = {"all", "codebase_context", "codebase_artifact_query", "my_new_tool"}
 ```
 
 ### Testing MCP Integration
@@ -663,7 +674,7 @@ async def main():
             print(f"Available tools: {[tool.name for tool in tools.tools]}")
 
             result = await session.call_tool(
-                "codebase_query",
+                "codebase_artifact_query",
                 {
                     "query": "What does this codebase do?",
                     "codebase_dir": "/path/to/your/codebase"
