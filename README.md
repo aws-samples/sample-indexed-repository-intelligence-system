@@ -3,24 +3,18 @@
 
 # Indexed Repository Intelligence System (IRIS)
 
-IRIS is an intelligent codebase understanding tool built on AWS-native primitives such as AgentCore and Strands Agents. It analyzes codebases, generates structured overviews, and answers questions in depth, helping both technical and non-technical audiences quickly understand unfamiliar code, troubleshoot issues, and extract insights.
+Ask questions about any repository and get detailed, grounded answers. IRIS reads a repository once and summarizes every file, then uses that summary index to pull the right files for each question, so answers cite real code instead of guessing.
 
-IRIS offers CLI and UI interfaces in both local and deployed configurations. Use it as an onboarding and knowledge-transfer tool, or as a template for embedding codebase understanding into your own applications.
+Built on AWS-native primitives (Amazon Bedrock, Strands Agents, AgentCore), IRIS offers four ways in: a CLI, a deployable web app, an agent skill, and an MCP server. Use it for onboarding and knowledge transfer, to augment your coding assistant, or as a template for embedding codebase understanding into your own applications.
 
-## Project Overview
+## Why IRIS
 
-IRIS provides:
-
-- **Automatic codebase summarization**
-- **Project artifact indexing and QA** (PPTX, DOCX, XLSX, PDF, MD, TXT, video)
-- **Intelligent file selection based on user queries**
-- **Multi-turn conversation support**
-- **Prompt caching for improved performance**
-- **Parallel file processing with multiple models and regions**
-- **Efficient handling of file content changes**
-- **Streaming responses for real-time interaction**
-- **Additional context support**
-- **MCP integration for AI assistants**
+- **Answers for everyone.** The deployable web app lets product managers, security reviewers, and new hires ask codebase questions from a browser. No terminal, no local setup, no AWS credentials.
+- **Benchmarked against the leading alternative.** On [SWE-QA](https://github.com/peng-weihan/SWE-QA-Bench), an open-source benchmark for repository-level code question answering, IRIS outperforms DeepWiki on 14 of 15 repositories using Claude Sonnet and 13 of 15 using Haiku.
+- **Code *and* project documents.** IRIS indexes slide decks, design docs, spreadsheets, PDFs, and recorded meetings alongside source code, so you can ask "is there code in the repo matching what we discussed at kickoff?" and get an answer grounded in both. See [Project Artifact Indexing and QA](docs/artifact-indexing.md).
+- **Works inside your coding assistant.** The `iris-query` skill and MCP server bring IRIS into coding assistants such as Claude Code, Kiro, and Cline, where a precomputed summary replaces 10–20 exploratory tool calls per question.
+- **No vector database.** The summary index is readable JSON. Commit it next to your code along with the `iris-query` skill, and teammates get full codebase context from a plain `git clone`.
+- **Grounded, not stale.** Local hashing detects file drift on every question, so changed files are read live rather than answered from an outdated summary.
 
 ## Quick Start
 
@@ -109,6 +103,15 @@ iris prepare --code
 iris prepare --artifact
 ```
 
+## Capabilities
+
+- **Project artifact indexing and QA** — PPTX, DOCX, XLSX, PDF, MD, TXT, and video (`.mp4`, `.mov`, `.avi`, `.mkv`)
+- **Multi-turn conversations** with streaming responses
+- **Additional context support** — supplement the index with an external context file
+- **Optional web search** — augment answers with web search results (`web_search`)
+- **MCP integration in both directions** — expose IRIS to AI assistants, and let IRIS consume external MCP servers
+- **Performance** — prompt caching, parallel file processing across models and regions, and incremental re-indexing of changed files only
+
 ## Additional Documentation
 
 This documentation is organized into several key areas to help you understand, deploy, and develop with IRIS:
@@ -120,12 +123,11 @@ This documentation is organized into several key areas to help you understand, d
 **Start here if you're:** using Claude Code, Kiro, or Cline to understand or edit codebases but wanting to use a precomputed codebase summary to provide baseline context and accelerate the exploration.
 
 Install it with `./deploy.sh` → option 5. The skill reads the precomputed index
-(`.iris_cache/`) directly as data, so a coding assistant can find the right files
-in one lookup instead of 10–20 exploratory calls, then read those files to ground
-the answer.
+(`.iris_cache/`) directly as data, so a coding assistant finds the right files in
+a single lookup, then reads those files to ground the answer.
 
-- **Zero-install for consumers.** Commit `.iris_cache/` and the skill folder; teammates need only `git clone` — no Python environment, no IRIS package, no AWS credentials.
-- **Staleness-safe.** Drift is detected by local hashing on every question; changed files are always read live rather than answered from a stale summary.
+- **Zero-install for consumers.** Commit `.iris_cache/` and the skill folder — that is everything a teammate needs.
+- **Staleness-safe.** Hashes are re-checked per question, so an out-of-date cache degrades to reading files live rather than to a wrong answer.
 - **One artifact, three hosts.** The same folder works in Claude Code, Kiro, and Cline.
 - **Complementary to the MCP server**, not a replacement — reading the index directly avoids a second LLM and needs no credentials at question time. Both integrations can be installed at once.
 
@@ -317,7 +319,7 @@ in your configuration.
 3. Refer back to this index for cross-references and additional information
 4. Use the troubleshooting sections when encountering issues
 
-# Security
+## Security
 
 ⚠️ **Important:** This asset is a proof-of-value demonstration and is not a production-ready solution. It passes automated security scanning at the time of contribution but is not guaranteed to receive ongoing security patches or dependency updates. You must thoroughly review all code before deploying to production. See [Security Documentation](docs/security.md) for details.
 
@@ -336,6 +338,6 @@ AWS offers a broad set of security tools and configurations to help you secure y
 
 If you discover a potential security issue in this project, we ask that you notify AWS/Amazon Security via our [vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/). Please do not create a public GitHub issue.
 
-# License
+## License
 
 This project is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
