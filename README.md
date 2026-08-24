@@ -3,9 +3,15 @@
 
 # Indexed Repository Intelligence System (IRIS)
 
-Ask questions about any repository and get detailed, grounded answers. IRIS reads a repository once and summarizes every file, then uses that summary index to pull the right files for each question, so answers cite real code instead of guessing.
+Ask questions about any repository and get detailed, grounded answers. IRIS reads a repository once and summarizes every file, then uses that summary index to load all the relevant files at once for each question, so answers cite real code instead of guessing.
 
 Built on AWS-native primitives (Amazon Bedrock, Strands Agents, AgentCore), IRIS offers four ways in: a CLI, a deployable web app, an agent skill, and an MCP server. Use it for onboarding and knowledge transfer, to augment your coding assistant, or as a template for embedding codebase understanding into your own applications.
+
+![IRIS answering a cross-file architecture question about the pytest codebase, showing code search and file retrieval running before a structured answer](docs/images/iris-demo.gif)
+
+You don't need to know what to ask, either. IRIS opens with suggested prompts, and clicking any file in the tree prefills the question box with `Tell me about <path>`.
+
+![Clicking py.py in the IRIS file tree, which prefills the question box with "Tell me about pytest/src/py.py"](docs/images/iris-file-click.gif)
 
 ## Why IRIS
 
@@ -15,6 +21,7 @@ Built on AWS-native primitives (Amazon Bedrock, Strands Agents, AgentCore), IRIS
 - **Works inside your coding assistant.** The `iris-query` skill and MCP server bring IRIS into coding assistants such as Claude Code, Kiro, and Cline, where a precomputed summary replaces 10–20 exploratory tool calls per question.
 - **No vector database.** The summary index is readable JSON. Commit it next to your code along with the `iris-query` skill, and teammates get full codebase context from a plain `git clone`.
 - **Grounded, not stale.** Local hashing detects file drift on every question, so changed files are read live rather than answered from an outdated summary.
+- **Answers in a single pass.** One call ranks every file relevant to the question, then all of them are ingested in one bulk read. No file-by-file exploration loop, so answers come back faster.
 
 ## Quick Start
 
@@ -110,6 +117,8 @@ iris prepare --artifact
 - **Additional context support** — supplement the index with an external context file
 - **Optional web search** — augment answers with web search results (`web_search`)
 - **MCP integration in both directions** — expose IRIS to AI assistants, and let IRIS consume external MCP servers
+- **Bulk multi-file ingestion** — relevant files are identified in one ranked pass and read as a single batch, capped by a configurable character budget
+- **Exact-match code search** — regex search across the repo returning file paths, line numbers, and surrounding context, for the precise lookups a prose summary cannot answer
 - **Performance** — prompt caching, parallel file processing across models and regions, and incremental re-indexing of changed files only
 
 ## Additional Documentation
