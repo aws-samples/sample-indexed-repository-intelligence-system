@@ -54,7 +54,7 @@ dependencies = [
   "python-multipart>=0.0.30",
   "lxml>=6.1.0",
   "gitpython>=3.1.58",
-  "tornado>=6.5.7",
+  "tornado>=6.5.8",
 ]
 
 [project.scripts]
