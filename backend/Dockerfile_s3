@@ -64,7 +64,7 @@ WORKDIR /app/iris
 RUN rm -f config.yaml && mv config_docker.yaml config.yaml
 
 # Install dependencies using uv
-RUN uv sync --frozen --no-cache
+RUN uv sync --frozen --no-dev --no-cache
 
 # Upgrade zipp and urllib3 to fix vulnerabilities
 RUN uv pip install --system --upgrade zipp "urllib3>=2.2.3"

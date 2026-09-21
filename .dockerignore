@@ -17,6 +17,7 @@
 infra/cdk.out
 **/.git
 **/node_modules
+tests/
 **/*.pyc
 **/.DS_Store
 *.log
