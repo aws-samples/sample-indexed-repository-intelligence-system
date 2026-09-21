@@ -20,7 +20,7 @@ dependencies = [
   "boto3>=1.40.11",
   "click",
   "streamlit",
-  "mcp[cli]>=1.13.0",
+  "mcp[cli]>=1.23.0,<2.2",
   "strands-agents>=1.26.0",
   "strands-agents-tools>=0.2.20",
   "prompt-toolkit",

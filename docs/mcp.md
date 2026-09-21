@@ -614,17 +614,21 @@ context_window_size: 100000 # Smaller for faster processing
 
 ### Adding New Tools
 
-To add new MCP tools, modify `iris_mcp/mcp_server.py`. The server uses `FastMCP` with the `@mcp.tool()` decorator:
+IRIS supports MCP Python SDK `>=1.23,<2.2`. MCP 2.0 and 2.1 expose `MCPServer`; MCP 1.x uses the compatible `FastMCP` implementation, aliased to the same local name:
 
 ```python
-from mcp.server.fastmcp import Context, FastMCP
+from mcp import server as mcp_server
+
+if hasattr(mcp_server, "MCPServer"):
+    MCPServer = mcp_server.MCPServer
+else:  # MCP Python SDK 1.x
+    from mcp.server.fastmcp import FastMCP as MCPServer
 from pydantic import Field
 
-mcp = FastMCP("iris", lifespan=lifespan)
+mcp = MCPServer("iris", lifespan=lifespan)
 
 # Define the tool function
 async def my_new_tool(
-    ctx: Context,
     param: str = Field(description="Parameter description"),
 ):
     """Tool docstring becomes the MCP tool description."""
@@ -639,7 +643,12 @@ if is_tool_enabled("my_new_tool", enabled_tools):
 Remember to add the new tool name to the valid set in `get_enabled_tools()`:
 
 ```python
-valid_tools = {"all", "codebase_context", "codebase_artifact_query", "my_new_tool"}
+valid_tools = {
+    "all",
+    "codebase_artifact_context",
+    "codebase_artifact_query",
+    "my_new_tool",
+}
 ```
 
 ### Testing MCP Integration
@@ -647,18 +656,17 @@ valid_tools = {"all", "codebase_context", "codebase_artifact_query", "my_new_too
 #### Integration Tests
 
 ```bash
-# Test with real MCP client
-python tests/integration/test_mcp.py
+# Test the stdio contract with the installed MCP SDK version
+.venv/bin/pytest -q tests/integration/test_mcp.py
 ```
 
 ### Custom Client Integration
 
-To integrate with a custom MCP client:
+The server accepts MCP SDK `>=1.23,<2.2` stdio clients. This example uses the MCP 2.x high-level client:
 
 ```python
 import asyncio
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import Client, StdioServerParameters
 
 async def main():
     server_params = StdioServerParameters(
@@ -666,21 +674,18 @@ async def main():
         args=["/path/to/iris/iris_mcp/mcp_server.py"]
     )
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with Client(server_params) as client:
+        tools = await client.list_tools()
+        print(f"Available tools: {[tool.name for tool in tools.tools]}")
 
-            tools = await session.list_tools()
-            print(f"Available tools: {[tool.name for tool in tools.tools]}")
-
-            result = await session.call_tool(
-                "codebase_artifact_query",
-                {
-                    "query": "What does this codebase do?",
-                    "codebase_dir": "/path/to/your/codebase"
-                }
-            )
-            print(f"Result: {result.content[0].text}")
+        result = await client.call_tool(
+            "codebase_artifact_query",
+            {
+                "query": "What does this codebase do?",
+                "codebase_dir": "/path/to/your/codebase"
+            }
+        )
+        print(f"Result: {result.content[0].text}")
 
 if __name__ == "__main__":
     asyncio.run(main())

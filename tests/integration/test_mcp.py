@@ -211,3 +211,92 @@ class TestMCPTools:
             assert inspect.iscoroutinefunction(codebase_artifact_query)
         except ImportError:
             pytest.skip("MCP dependencies not installed")
+
+    def test_mcp_protocol_contract(self, tmp_path):
+        """Test schemas and text results over stdio with either MCP SDK major."""
+        import asyncio
+        import os
+        import sys
+
+        from mcp import ClientSession, StdioServerParameters, stdio_client
+
+        async def verify_contract():
+            config_path = tmp_path / "mcp-config.yaml"
+            config_path.write_text(
+                "mcp_enabled_tools:\n  - all\n",
+                encoding="utf-8",
+            )
+            server_params = StdioServerParameters(
+                command=sys.executable,
+                args=[
+                    "-m",
+                    "iris_mcp.mcp_server",
+                    "--config",
+                    str(config_path),
+                ],
+                env=dict(os.environ),
+            )
+
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    listed_tools = await session.list_tools()
+                    tools = {tool.name: tool for tool in listed_tools.tools}
+
+                    assert set(tools) == {
+                        "codebase_artifact_context",
+                        "codebase_artifact_query",
+                    }
+
+                    context_tool = tools["codebase_artifact_context"].model_dump(
+                        by_alias=True, exclude_none=True
+                    )
+                    context_schema = context_tool["inputSchema"]
+                    assert set(context_schema["properties"]) == {
+                        "codebase_dir",
+                        "artifact_dir",
+                    }
+                    assert set(context_schema["required"]) == {"codebase_dir"}
+                    assert context_schema["properties"]["artifact_dir"]["default"] == ""
+                    assert "outputSchema" not in context_tool
+
+                    query_tool = tools["codebase_artifact_query"].model_dump(
+                        by_alias=True, exclude_none=True
+                    )
+                    query_schema = query_tool["inputSchema"]
+                    assert set(query_schema["properties"]) == {
+                        "query",
+                        "codebase_dir",
+                        "artifact_dir",
+                    }
+                    assert set(query_schema["required"]) == {
+                        "query",
+                        "codebase_dir",
+                    }
+                    assert "outputSchema" not in query_tool
+
+                    missing_codebase = str(tmp_path / "missing-codebase")
+                    calls = {
+                        "codebase_artifact_context": {
+                            "codebase_dir": missing_codebase,
+                        },
+                        "codebase_artifact_query": {
+                            "query": "What does this codebase do?",
+                            "codebase_dir": missing_codebase,
+                        },
+                    }
+
+                    for tool_name, arguments in calls.items():
+                        result = await session.call_tool(tool_name, arguments)
+                        result_data = result.model_dump(
+                            by_alias=True, exclude_none=True
+                        )
+                        assert not result_data.get("isError", False)
+                        assert "structuredContent" not in result_data
+                        assert len(result_data["content"]) == 1
+                        assert result_data["content"][0]["type"] == "text"
+                        assert result_data["content"][0]["text"].startswith(
+                            "❌ Invalid path:"
+                        )
+
+        asyncio.run(verify_contract())
