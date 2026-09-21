@@ -53,8 +53,8 @@ dependencies = [
   "cryptography>=50.0.0",
   "python-multipart>=0.0.30",
   "lxml>=6.1.0",
-  "gitpython>=3.1.58",
-  "tornado>=6.5.7",
+  "gitpython>=3.1.59",
+  "tornado>=6.5.9",
 ]
 
 [project.scripts]
@@ -85,10 +85,12 @@ exclude-newer = "7 days"
 # Narrow, per-package exemptions from the global cooling-off window, used only
 # when a security fix lands inside it. Pinned to a timestamp just past the
 # patched release so newer, un-vetted versions are still held back.
-exclude-newer-package = { gitpython = "2026-08-05T00:00:00Z" }
+exclude-newer-package = { gitpython = "2026-08-11T00:00:00Z", tornado = "2026-09-14T18:09:00Z" }
 constraint-dependencies = [
   # GHSA-3f7w-8rr8-f37f, GHSA-4gmw-gg2m-w46p, GHSA-9rj7-rf2p-w77r, GHSA-hmq2-w58f-27jc
-  "gitpython>=3.1.58",
+  # GHSA-284h-m62q-gf8w, GHSA-8mcc-hrx5-hvxc, GHSA-7833-fr7j-v32q
+  # GHSA-3wxw-xv34-2frg, GHSA-5xxx-qhh7-9287
+  "gitpython>=3.1.59",
   "python-multipart>=0.0.30",
   "urllib3>=2.7.0",
   "lxml>=6.1.0",
@@ -97,9 +99,12 @@ constraint-dependencies = [
   "pytest>=9.0.3",
   # GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7, GHSA-mfx4-hv73-q22v
   "aiohttp>=3.14.3",
+  # GHSA-82r6-8w77-94w6, GHSA-3w57-8xmc-8v26, GHSA-5p39-cfhj-2xmp
+  "anyio>=4.14.2",
   # GHSA-6hr6-w5qg-qmwg
   "h2>=4.4.1",
-  "soupsieve>=2.8.4",
+  # GHSA-gjv8-xp57-g29c, GHSA-j934-xhv5-fg8f
+  "soupsieve>=2.9",
   "idna>=3.15",
   "pydantic-settings>=2.14.2",
 ]

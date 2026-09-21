@@ -104,7 +104,10 @@ def chat(codebase, context, skip_validation):
     default=True,
     help="Show detailed progress information (default: enabled)",
 )
-def prepare(codebase, code, artifact, context, verbose):
+@click.option(
+    "--force", is_flag=True, help="Re-extract all artifacts, ignoring the cache"
+)
+def prepare(codebase, code, artifact, context, verbose, force):
     """Generate/update codebase and artifact context.
 
     By default (no flags), generates both codebase and artifact context.
@@ -152,6 +155,7 @@ def prepare(codebase, code, artifact, context, verbose):
                     output_dir=str(output_dir),
                     config=config,
                     verbose=verbose,
+                    force=force,
                 )
                 if artifact_result.status == "error":
                     print(f"⚠️  Artifact indexing failed: {artifact_result.message}")

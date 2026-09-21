@@ -54,7 +54,7 @@ describe("CodebaseDrawer", () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
-  it("displays codebase path when open", () => {
+  it("displays codebase name when open", () => {
     const onToggle = vi.fn();
     render(
       <CodebaseDrawer
@@ -66,7 +66,7 @@ describe("CodebaseDrawer", () => {
     );
 
     const codebasePath = screen.getByTestId("codebase-path");
-    expect(codebasePath).toHaveTextContent("/path/to/codebase");
+    expect(codebasePath).toHaveTextContent("codebase");
   });
 
   it("displays last evaluation timestamp when open", () => {

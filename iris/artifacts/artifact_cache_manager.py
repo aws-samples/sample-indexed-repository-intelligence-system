@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 ARTIFACT_HASHES_FILE = "artifact_file_hashes.json"
 ARTIFACT_OVERVIEW_FILE = "artifact_overview.json"
+ARTIFACT_PROCESSING_CONFIG_FINGERPRINT_FILE = "artifact_config_fingerprint.json"
 
 
 class ArtifactCacheManager:
@@ -94,6 +95,17 @@ class ArtifactCacheManager:
         if self._overview is None:
             raise ValueError("Could not load artifact overview")
         return self._overview
+
+    def processing_config_has_changed(self, fingerprint: str) -> bool:
+        """Return whether artifact processing settings differ from the cached run."""
+        cached = self._load_json(ARTIFACT_PROCESSING_CONFIG_FINGERPRINT_FILE, default={})
+        return cached.get("fingerprint") != fingerprint
+
+    def save_processing_config_fingerprint(self, fingerprint: str) -> None:
+        """Persist the artifact-processing-settings fingerprint."""
+        self._save_json(
+            ARTIFACT_PROCESSING_CONFIG_FINGERPRINT_FILE, {"fingerprint": fingerprint}
+        )
 
     # ------------------------------------------------------------------
     # Change detection

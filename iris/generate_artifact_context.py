@@ -6,6 +6,8 @@ Orchestrator for artifact discovery, extraction, storage, and summarization.
 Analogous to :func:`generate_context` for the codebase pipeline.
 """
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Literal
@@ -27,6 +29,25 @@ from .artifacts import ExtractionResult
 
 logger = logging.getLogger(__name__)
 
+_ARTIFACT_PROCESSING_CONFIG_DEFAULTS = {
+    "artifact_max_file_size": 30_000_000,
+    "artifact_video_max_file_size": 300_000_000,
+    "artifact_ocr_enabled": False,
+    "artifact_ocr_provider": "llm",
+    "artifact_ocr_max_pages": 50,
+    "artifact_transcription_enabled": False,
+    "artifact_transcribe_s3_bucket": "",
+}
+
+
+def _artifact_processing_config_fingerprint(config: dict) -> str:
+    settings = {
+        key: config.get(key, default)
+        for key, default in _ARTIFACT_PROCESSING_CONFIG_DEFAULTS.items()
+    }
+    payload = json.dumps(settings, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 class ArtifactContextResult(BaseModel):
     """Result of artifact context generation."""
@@ -44,6 +65,7 @@ def generate_artifact_context(
     output_dir: str | Path,
     config: dict | None = None,
     verbose: bool = False,
+    force: bool = False,
 ) -> ArtifactContextResult:
     """Orchestrate the full artifact indexing pipeline.
 
@@ -127,8 +149,16 @@ def generate_artifact_context(
 
         cache = ArtifactCacheManager(out_path)
         changes = cache.has_changed(current_hashes)
+        artifact_processing_fingerprint = _artifact_processing_config_fingerprint(config)
+        artifact_processing_config_changed = cache.processing_config_has_changed(
+            artifact_processing_fingerprint
+        )
 
-        if not changes["has_changed"]:
+        if (
+            not force
+            and not artifact_processing_config_changed
+            and not changes["has_changed"]
+        ):
             msg = "All artifacts are up to date, no processing needed."
             if verbose:
                 print(f"✅ {msg}")
@@ -138,7 +168,11 @@ def generate_artifact_context(
                 total_artifacts=len(artifacts),
             )
 
-        files_to_process = changes["changed_files"]
+        files_to_process = (
+            list(current_hashes)
+            if force or artifact_processing_config_changed
+            else changes["changed_files"]
+        )
         if verbose:
             print(f"🔄 Processing {len(files_to_process)} changed artifacts")
             if changes["new_files"]:
@@ -195,8 +229,9 @@ def generate_artifact_context(
                 max_workers=max_workers,
             )
 
-        # Step 7: Save updated hashes
+        # Step 7: Save updated hashes and artifact processing settings
         cache.save_hashes(current_hashes)
+        cache.save_processing_config_fingerprint(artifact_processing_fingerprint)
 
         processed = [r.file_path for r in successful]
         msg = f"Successfully processed {len(processed)} artifacts."

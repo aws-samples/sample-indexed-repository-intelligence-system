@@ -599,6 +599,36 @@ ensure_ffmpeg_installed() {
     done
 }
 
+# Normalize and validate a user-provided S3 bucket name.
+normalize_s3_bucket_name() {
+    local bucket_name=$1
+    case "$bucket_name" in
+        [Ss]3://* ) bucket_name=${bucket_name#*://} ;;
+    esac
+    bucket_name=${bucket_name%/}
+
+    if [ ${#bucket_name} -lt 3 ] || [ ${#bucket_name} -gt 63 ] || \
+       ! [[ "$bucket_name" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] || \
+       [[ "$bucket_name" == *".."* ]] || \
+       [[ "$bucket_name" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        print_error "Invalid S3 bucket name: $bucket_name" >&2
+        return 1
+    fi
+
+    case "$bucket_name" in
+        xn--*|sthree-*|amzn-s3-demo-*|*-s3alias|*--ol-s3|*.mrap|*--x-s3|*--table-s3 )
+            print_error "Invalid S3 bucket name: $bucket_name" >&2
+            return 1
+            ;;
+    esac
+
+    printf "%s" "$bucket_name"
+}
+
+s3_bucket_reachable() {
+    aws s3api head-bucket --bucket "$1" >/dev/null 2>&1
+}
+
 # Function to check and configure video transcription settings
 # Called after artifact directory is confirmed, only if artifact_dir is set
 configure_video_transcription() {
@@ -610,14 +640,31 @@ configure_video_transcription() {
         transcription_enabled=$(grep "^artifact_transcription_enabled:" "$config_file" | sed 's/artifact_transcription_enabled: *//' | xargs || true)
     fi
 
+    local enabling_transcription="false"
     if [ "$transcription_enabled" != "true" ]; then
-        return 0
+        local artifact_dir=""
+        local video_file=""
+        artifact_dir=$(grep "^artifact_dir:" "$config_file" | sed 's/artifact_dir: *//' | xargs || true)
+        if [ -d "$artifact_dir" ]; then
+            video_file=$(find "$artifact_dir" -type f \
+                \( -iname '*.mp4' -o -iname '*.mov' -o -iname '*.avi' -o -iname '*.mkv' \) \
+                -print -quit 2>/dev/null || true)
+        fi
+        if [ -z "$video_file" ]; then
+            return 0
+        fi
+        enabling_transcription="true"
     fi
 
     # Transcription is enabled — warn user about cost and delay
     echo ""
     print_header "Video Transcription Configuration"
-    print_warning "Video transcription is ENABLED in config.yaml."
+    if [ "$enabling_transcription" = "true" ]; then
+        print_warning "Video files were found, but transcription is DISABLED."
+        print_warning "Without transcription, videos are indexed as metadata only."
+    else
+        print_warning "Video transcription is ENABLED in config.yaml."
+    fi
     echo ""
     print_info "This uses Amazon Transcribe to convert speech-to-text in video files,"
     print_info "plus LLM-based analysis of 3 keyframes per video."
@@ -628,12 +675,21 @@ configure_video_transcription() {
     echo "  - Requires an Amazon S3 bucket for temporary video upload"
     echo ""
 
+    local transcription_prompt="Continue with video transcription enabled? [y/N]: "
+    if [ "$enabling_transcription" = "true" ]; then
+        transcription_prompt="Enable video transcription? [y/N]: "
+    fi
+
     while true; do
-        print_prompt "Continue with video transcription enabled? [y/N]: "
+        print_prompt "$transcription_prompt"
         read -r reply
         reply=${reply:-N}
         case $reply in
             [Yy]* )
+                if [ "$enabling_transcription" = "true" ]; then
+                    update_config_field "artifact_transcription_enabled" "true"
+                fi
+
                 # User confirmed — now validate S3 bucket and region
                 local current_bucket=""
 
@@ -656,6 +712,19 @@ configure_video_transcription() {
                     return 0
                 fi
 
+                local normalized_bucket=""
+                if ! normalized_bucket=$(normalize_s3_bucket_name "$new_bucket"); then
+                    update_config_field "artifact_transcription_enabled" "false"
+                    return 0
+                fi
+                new_bucket=$normalized_bucket
+
+                if ! s3_bucket_reachable "$new_bucket"; then
+                    print_warning "S3 bucket '$new_bucket' is not reachable — disabling video transcription."
+                    update_config_field "artifact_transcription_enabled" "false"
+                    return 0
+                fi
+
                 # Update config
                 update_config_field "artifact_transcribe_s3_bucket" "\"$new_bucket\""
 
@@ -669,8 +738,12 @@ configure_video_transcription() {
                 break
                 ;;
             [Nn]* )
-                print_info "Disabling video transcription for this run."
-                update_config_field "artifact_transcription_enabled" "false"
+                if [ "$enabling_transcription" = "true" ]; then
+                    print_info "Leaving video transcription disabled — videos will be metadata-only."
+                else
+                    print_info "Disabling video transcription for this run."
+                    update_config_field "artifact_transcription_enabled" "false"
+                fi
                 break
                 ;;
             * )
@@ -1223,10 +1296,14 @@ setup_s3_bucket() {
         return 1
     fi
 
-    print_info "Checking if bucket exists..." >&2
+    if ! bucket_name=$(normalize_s3_bucket_name "$bucket_name"); then
+        return 1
+    fi
 
-    if aws s3 ls "s3://$bucket_name" 2>/dev/null 1>&2; then
-        print_success "Bucket '$bucket_name' exists" >&2
+    print_info "Checking if bucket is reachable..." >&2
+
+    if s3_bucket_reachable "$bucket_name"; then
+        print_success "Bucket '$bucket_name' exists and is reachable" >&2
 
         # Ask about KMS for existing bucket
         if [ -n "$current_kms_key" ]; then
@@ -1264,7 +1341,7 @@ setup_s3_bucket() {
             fi
         fi
     else
-        print_warning "Bucket '$bucket_name' does not exist" >&2
+        print_warning "Bucket '$bucket_name' does not exist or is not reachable" >&2
         read -r -p "Create bucket '$bucket_name'? [Y/n]: " -r >&2
         REPLY=${REPLY:-Y}
         if [[ $REPLY =~ ^[Yy]$ ]]; then
