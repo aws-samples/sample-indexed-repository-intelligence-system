@@ -9,7 +9,7 @@ from strands.models.bedrock import BedrockModel
 from pathlib import Path
 from pydantic import BaseModel, Field
 
-from ..file_system.file_utils import handle_notebook, MAX_NOTEBOOK_SIZE
+from ..file_system.file_utils import handle_notebook, get_max_notebook_size
 from ..utils.bedrock import extended_ttl_models
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def read_multiple_files(
         # Read text (best-effort UTF-8)
         try:
             if fp.suffix == ".ipynb":
-                body, size = handle_notebook(fp, MAX_NOTEBOOK_SIZE, True)
+                body, size = handle_notebook(fp, get_max_notebook_size(), True)
             else:
                 body = fp.read_text(encoding="utf-8", errors="ignore")
         except Exception:

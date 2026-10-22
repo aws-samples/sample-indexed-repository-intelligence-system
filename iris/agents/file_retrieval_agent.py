@@ -22,7 +22,6 @@ from ..summarize.utils import load_prompts
 log = logging.getLogger(__name__)
 
 # Load defaults at module import
-_DEFAULT_CONFIG = load_default_config()
 _DEFAULT_PROMPTS = load_prompts()
 
 # Toggle context capping (set to False to disable for A/B comparison)
@@ -143,7 +142,7 @@ def file_retrieval_agent(query: str, tool_context: ToolContext) -> str:
         - Uses configuration from config.yaml for model settings
         - Respects context window limits when reading files
     """
-    config = _DEFAULT_CONFIG
+    config = load_default_config()
     codebase_overview_path = Path(construct_output_dir()) / "codebase_overview.json"
     additional_context = get_additional_context()
 

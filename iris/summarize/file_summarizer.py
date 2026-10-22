@@ -20,7 +20,6 @@ from ..utils.bedrock import call_bedrock
 log = logging.getLogger(__name__)
 
 
-_DEFAULT_CONFIG = load_default_config()
 _DEFAULT_PROMPTS = load_prompts()
 
 
@@ -208,7 +207,9 @@ def summarize_files(
         return {}
 
     if models is None:
-        models = _DEFAULT_CONFIG["model_configuration"]["file_summarizer"]["models"]
+        models = load_default_config()["model_configuration"]["file_summarizer"][
+            "models"
+        ]
         validate_llm_model_access(models)
 
     if prompts is None:

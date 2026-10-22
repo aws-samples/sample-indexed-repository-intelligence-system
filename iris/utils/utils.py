@@ -119,21 +119,21 @@ def load_default_config() -> dict:
     with open(user_config_path, "r") as f:
         user_config = yaml.safe_load(f) or {}
 
-    # Determine base config: config.yaml > config_template.yaml
+    # Determine base config: config.yaml > the template (config_template.yaml at
+    # the project root, or pkg_config_template.yaml in an installed package)
     base_config_path = Path(__file__).parent.parent.parent / "config.yaml"
-    template_config_path = Path(__file__).parent.parent / "config_template.yaml"
 
     if base_config_path.exists():
         # Use config.yaml as base
         with open(base_config_path, "r") as f:
             base_config = yaml.safe_load(f) or {}
-    elif template_config_path.exists():
-        # Use config_template.yaml as base
-        base_config = load_template_config()
     else:
-        # No base config, just return user config
-        _cached_config = user_config
-        return _cached_config
+        try:
+            base_config = load_template_config()
+        except ConfigNotFound:
+            # No base config, just return user config
+            _cached_config = user_config
+            return _cached_config
 
     # Merge: base config + user config overrides
     _cached_config = deep_merge(base_config, user_config)

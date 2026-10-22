@@ -24,12 +24,13 @@ from ..summarize.utils import load_prompts
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG = load_default_config()
 _DEFAULT_PROMPTS = load_prompts()
 
-# Maximum characters of artifact content to return (conservative limit
-# to leave room for codebase context and conversation history).
-_MAX_ARTIFACT_CONTEXT_CHARS = _DEFAULT_CONFIG.get("context_window_size", 200_000) * 2
+
+def _max_artifact_context_chars(config: dict) -> int:
+    """Maximum characters of artifact content to return (conservative limit
+    to leave room for codebase context and conversation history)."""
+    return config.get("context_window_size", 200_000) * 2
 
 
 def _load_artifact_overview(output_dir: Path) -> dict:
@@ -108,7 +109,7 @@ def artifact_retrieval_agent(query: str, tool_context: ToolContext) -> str:
     Returns:
         Formatted context string with relevant artifact content and metadata.
     """
-    config = _DEFAULT_CONFIG
+    config = load_default_config()
     output_dir = Path(construct_output_dir())
     logger.info("artifact_retrieval_agent: looking for artifacts in %s", output_dir)
     overview = _load_artifact_overview(output_dir)
@@ -165,6 +166,7 @@ def artifact_retrieval_agent(query: str, tool_context: ToolContext) -> str:
         f"Relevant artifacts: {len(relevant_paths)} of {len(overview)} total\n"
     )
 
+    max_chars = _max_artifact_context_chars(config)
     total_chars = 0
     loaded_count = 0
 
@@ -176,7 +178,7 @@ def artifact_retrieval_agent(query: str, tool_context: ToolContext) -> str:
 
         if content:
             # Check if adding this would exceed the limit
-            if total_chars + len(content) > _MAX_ARTIFACT_CONTEXT_CHARS:
+            if total_chars + len(content) > max_chars:
                 # Use summary instead of full content
                 logger.info(
                     "Truncating to summary for %s (would exceed context limit)",

@@ -11,10 +11,21 @@ import chardet
 import pathspec
 from ..utils.utils import load_default_config
 
-CONFIG = load_default_config()
-MAX_FILE_SIZE = CONFIG["max_file_size"]
-MAX_NOTEBOOK_SIZE = CONFIG["max_notebook_size"]
-MAX_TOKENS = CONFIG["context_window_size"]
+
+def get_max_file_size() -> int:
+    """Largest non-notebook file to read, from the current config."""
+    return load_default_config()["max_file_size"]
+
+
+def get_max_notebook_size() -> int:
+    """Largest notebook to read, from the current config."""
+    return load_default_config()["max_notebook_size"]
+
+
+def get_max_tokens() -> int:
+    """Context window size, from the current config."""
+    return load_default_config()["context_window_size"]
+
 
 log = logging.getLogger(__name__)
 
@@ -339,8 +350,8 @@ def _should_ignore_item(item: Path, root_dir: Path, ignore_spec) -> bool:
     try:
         # Ignore files that will not be summarized due to size limit
         if item.is_file() and (
-            (item.suffix != ".ipynb" and item.stat().st_size > MAX_FILE_SIZE)
-            or item.stat().st_size > MAX_NOTEBOOK_SIZE
+            (item.suffix != ".ipynb" and item.stat().st_size > get_max_file_size())
+            or item.stat().st_size > get_max_notebook_size()
         ):
             return True
 
@@ -445,10 +456,17 @@ def handle_notebook(
 def read_source(
     path: Path,
     codebase_dir: str,
-    max_file_size: int = MAX_FILE_SIZE,
-    max_notebook_size: int = MAX_NOTEBOOK_SIZE,
-    max_tokens: int = MAX_TOKENS,
+    max_file_size: int | None = None,
+    max_notebook_size: int | None = None,
+    max_tokens: int | None = None,
 ) -> str | None:
+    # Limits default to the current config, read when called
+    if max_file_size is None:
+        max_file_size = get_max_file_size()
+    if max_notebook_size is None:
+        max_notebook_size = get_max_notebook_size()
+    if max_tokens is None:
+        max_tokens = get_max_tokens()
     # Convert to absolute path if needed
     if not path.is_absolute():
         path = to_absolute_path(path, codebase_dir)

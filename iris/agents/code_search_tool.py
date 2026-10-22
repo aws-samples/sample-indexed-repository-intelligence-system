@@ -21,7 +21,6 @@ from ..utils.utils import load_default_config, get_ignore_patterns
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG = load_default_config()
 
 _REGEX_TIMEOUT_SECONDS = 5
 
@@ -231,7 +230,7 @@ def code_search_tool(
         - Find class definitions: pattern="^class ", file_pattern="*.py"
         - Find config references: pattern="config\\[", case_sensitive=True
     """
-    config = _DEFAULT_CONFIG
+    config = load_default_config()
     codebase_dir = (
         tool_context.agent.state.get("codebase_dir") or config["codebase_dir"]
     )
