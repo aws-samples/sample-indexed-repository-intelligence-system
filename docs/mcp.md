@@ -603,13 +603,13 @@ context_window_size: 100000 # Smaller for faster processing
 
 ### Adding New Tools
 
-To add new MCP tools, modify `iris_mcp/mcp_server.py`. The server uses `FastMCP` with the `@mcp.tool()` decorator:
+To add new MCP tools, modify `iris_mcp/mcp_server.py`. The server uses `MCPServer` (mcp 2.x; formerly `FastMCP`) with the `@mcp.tool()` decorator:
 
 ```python
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import Field
 
-mcp = FastMCP("iris", lifespan=lifespan)
+mcp = MCPServer("iris", lifespan=lifespan)
 
 # Define the tool function
 async def my_new_tool(

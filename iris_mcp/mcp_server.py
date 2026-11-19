@@ -10,7 +10,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 # Configure logging to stderr (MCP uses stdout for protocol)
@@ -38,7 +38,7 @@ from iris.utils.utils import (  # noqa: E402
 
 
 @asynccontextmanager
-async def lifespan(server: FastMCP):
+async def lifespan(server: MCPServer):
     logger.info("MCP server starting")
     try:
         yield
@@ -46,7 +46,7 @@ async def lifespan(server: FastMCP):
         logger.info("MCP server shutting down")
 
 
-mcp = FastMCP("iris", lifespan=lifespan)
+mcp = MCPServer("iris", lifespan=lifespan)
 
 
 def get_enabled_tools():
